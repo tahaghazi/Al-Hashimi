@@ -1,0 +1,41 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="HtmlUnknownAttribute" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="myValues">
+        <value>
+          <list size="1">
+            <item index="0" class="java.lang.String" itemvalue="controlslist" />
+          </list>
+        </value>
+      </option>
+      <option name="myCustomValuesEnabled" value="true" />
+    </inspection_tool>
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredPackages">
+        <value>
+          <list size="1">
+            <item index="0" class="java.lang.String" itemvalue="channels" />
+          </list>
+        </value>
+      </option>
+    </inspection_tool>
+    <inspection_tool class="PyUnresolvedReferencesInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredIdentifiers">
+        <list>
+          <option value="django.db.models.fields.related.ForeignKey.service_prices" />
+          <option value="django.db.models.fields.related.ForeignKey.seller" />
+          <option value="django.contrib.auth.models.User.user_type" />
+          <option value="src.apps.accounts.models.CustomUser.profile_images" />
+          <option value="viewsets" />
+          <option value="django.contrib.auth.models.User.expressor_profile" />
+          <option value="django.contrib.auth.models.User.service" />
+          <option value="django.db.models.fields.related.OneToOneField.video_session" />
+          <option value="django.db.models.fields.related.ForeignKey.user_balances" />
+          <option value="src.apps.bills.app_tools.ConfigApp.SendBillAlertThread.website_settings" />
+          <option value="django.db.models.fields.related.ForeignKey.id" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>
