@@ -4,7 +4,7 @@ from django.contrib import admin
 # Register your models here.
 
 # Register your models here.
-app = apps.get_app_config("alerts")
+app = apps.get_app_config("orders")
 
 # Register all models.
 for model in app.get_models():
