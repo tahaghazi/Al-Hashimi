@@ -11,9 +11,13 @@ def generate_username():
 # Create your models here.
 class CustomUser(AbstractUser):
     phone = models.CharField(max_length=20, null=True, blank=True)
+    deleted = models.BooleanField(default=False)
 
     def save(self, *args, **kwargs):
         if not self.username:
             self.username = generate_username()
         super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.first_name
 

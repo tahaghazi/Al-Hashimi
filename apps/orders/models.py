@@ -52,4 +52,4 @@ class Order(models.Model):
             self.save()
 
     def amount_to_pay(self):
-        return self.total - self.supplement
+        return self.total + self.supplement
