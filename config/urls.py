@@ -20,7 +20,7 @@ from django.contrib import admin
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
-from apps.orders.api.viewsets import OrderViewSet
+from apps.orders.api.viewsets import OrderViewSet, UserBalanceViewSet
 from apps.products.api.viewsets import ProductViewSet, BrandViewSet
 from apps.users.api.viewsets import UserViewSet
 
@@ -29,6 +29,7 @@ router.register("users", UserViewSet, basename="users")
 router.register("products", ProductViewSet, basename="products")
 router.register("brand", BrandViewSet, basename="brand")
 router.register("orders", OrderViewSet, basename="orders")
+router.register(r'user-balance', UserBalanceViewSet, basename='user-balance')
 
 urlpatterns = [
     path('admin/', admin.site.urls),

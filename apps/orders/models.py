@@ -1,4 +1,7 @@
-from django.db import models
+import decimal
+
+from django.db import models, transaction
+
 
 # Create your models here.
 
@@ -53,3 +56,28 @@ class Order(models.Model):
 
     def amount_to_pay(self):
         return self.total + self.supplement
+
+
+class UserBalance(models.Model):
+    orders_total = models.DecimalField(max_digits=20, decimal_places=2, default=0)
+    paid_amount = models.DecimalField(max_digits=20, decimal_places=2, default=0)
+    user = models.OneToOneField("users.CustomUser", on_delete=models.CASCADE)
+
+    def get_user_balances_queryset(self):
+        return UserBalance.objects.filter(id=self.id)
+
+    @transaction.atomic(using="default")
+    def deposit(self, amount, balance):
+        """
+        The balance withdrawal function should be used instead of manually adjusting the balance and saving.
+        When making a withdrawal process, the user will not be able to modify until after it is completed,
+        and the process will not be saved until after its success.
+        """
+        amount = decimal.Decimal(amount)
+        obj = self.get_user_balances_queryset().select_for_update().get()
+        amount = getattr(obj, balance) + amount
+        setattr(obj, balance, amount)
+        obj.save()
+
+    def amount_to_pay(self):
+        return self.orders_total - self.paid_amount

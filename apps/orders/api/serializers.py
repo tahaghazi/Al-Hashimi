@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from apps.orders.models import Order, OrderItem
+from apps.orders.models import Order, OrderItem, UserBalance
 from apps.products.api.serializers import ProductSerializer
 from apps.users.api.serializers import UserSerializer
 
@@ -44,3 +44,20 @@ class OrderSerializer(serializers.ModelSerializer):
         order.order_items.set(order_items)
         order.save()
         return order
+
+
+class UserBalanceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UserBalance
+        fields = ['id', 'orders_total', 'paid_amount', 'user', 'amount_to_pay']
+        read_only_fields = ['orders_total', 'paid_amount']
+
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+        representation['amount_to_pay'] = instance.amount_to_pay()
+        return representation
+
+
+class UserBalanceDepositSerializer(serializers.Serializer):
+    amount = serializers.DecimalField(max_digits=20, decimal_places=2, min_value=0.01)
+    balance_type = serializers.ChoiceField(choices=['paid_amount'])
