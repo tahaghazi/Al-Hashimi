@@ -18,21 +18,15 @@ class OrderViewSet(viewsets.ModelViewSet):
 
 class UserBalanceViewSet(viewsets.ModelViewSet):
     serializer_class = UserBalanceSerializer
-
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields = ['user__id']
     def get_queryset(self):
         # Users can only see their own balance
-        UserBalance.objects.get_or_create(user=self.request.user)
-        return UserBalance.objects.filter(user=self.request.user)
+        return UserBalance.objects.all()
 
-    def get_object(self):
-        return UserBalance.objects.get_or_create(user=self.request.user)[0]
-
-    def list(self, request, *args, **kwargs):
-        return self.retrieve(request, *args, **kwargs)
-
-    @action(detail=False, methods=['post'], serializer_class=UserBalanceDepositSerializer)
-    def deposit(self, request):
-        user_balance = get_object_or_404(UserBalance, user=request.user)
+    @action(detail=True, methods=['post'], serializer_class=UserBalanceDepositSerializer)
+    def deposit(self, request, pk=None):
+        user_balance = get_object_or_404(UserBalance, pk=pk)
         serializer = self.get_serializer(data=request.data)
 
         if serializer.is_valid():

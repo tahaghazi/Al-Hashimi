@@ -2,6 +2,7 @@ import uuid
 
 from django.contrib.auth.models import User, AbstractUser
 from django.db import models
+from django.utils.translation import gettext_lazy as _
 
 
 def generate_username():
@@ -12,6 +13,12 @@ def generate_username():
 class CustomUser(AbstractUser):
     phone = models.CharField(max_length=20, null=True, blank=True)
     deleted = models.BooleanField(default=False)
+    first_name = models.CharField(_("first name"), max_length=150, blank=True, unique=True,
+                                  error_messages={
+                                      'unique': _("يوجد مستخدم بنفس الاسم بالفعل."),
+                                  })
+
+
 
     def save(self, *args, **kwargs):
         if not self.username:

@@ -53,6 +53,7 @@ class Order(models.Model):
         if not self.total == total:
             self.total = total
             self.save()
+            self.user.userbalance.deposit(self.amount_to_pay(), "orders_total")
 
     def amount_to_pay(self):
         return self.total + self.supplement
