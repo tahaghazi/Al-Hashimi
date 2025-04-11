@@ -3,6 +3,7 @@ from rest_framework import permissions, status
 from rest_framework import viewsets
 from rest_framework.response import Response
 
+from apps.orders.models import UserBalance
 from apps.users.api.serializers import UserSerializer
 
 
@@ -16,3 +17,8 @@ class UserViewSet(viewsets.ModelViewSet):
         instance.deleted = True
         instance.save()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    def get_object(self):
+        user = super().get_object()
+        UserBalance.objects.get_or_create(user=user)
+        return user
