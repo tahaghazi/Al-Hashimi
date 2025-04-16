@@ -1,3 +1,4 @@
+from django.db import transaction
 from rest_framework import serializers
 
 from apps.orders.models import Order, OrderItem, UserBalance
@@ -32,17 +33,18 @@ class OrderSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         order_items_data = validated_data.pop("order_items", [])  # Extract order_items data
-        order = Order.objects.create(**validated_data)
+        with transaction.atomic():
+            order = Order.objects.create(**validated_data)
 
-        # Create OrderItem instances and associate them with the order
-        order_items = []
-        for item_data in order_items_data:
-            order_item = OrderItem.objects.create(**item_data)
-            order_items.append(order_item)
+            # Create OrderItem instances and associate them with the order
+            order_items = []
+            for item_data in order_items_data:
+                order_item = OrderItem.objects.create(**item_data)
+                order_items.append(order_item)
 
-        # Add the created order items to the ManyToMany field
-        order.order_items.set(order_items)
-        order.save()
+            # Add the created order items to the ManyToMany field
+            order.order_items.set(order_items)
+            order.save()
         return order
 
 
