@@ -11,7 +11,7 @@ class Brand(models.Model):
 
 class Product(models.Model):
     name = models.CharField(max_length=255)
-    brand = models.ForeignKey(Brand, on_delete=models.SET_NULL, blank=True, null=True)
+    brand = models.ForeignKey(Brand, on_delete=models.SET_NULL, null=True)
     description = models.TextField(null=True, blank=True)
     sku = models.CharField(max_length=255, null=True, blank=True)
     price = models.DecimalField(max_digits=20, decimal_places=2)
@@ -27,5 +27,3 @@ class Product(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
-
-
