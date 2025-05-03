@@ -20,17 +20,24 @@ class OrderItem(models.Model):
         ordering = ["-created_at"]
 
     def save(self, *args, **kwargs):
+        # Calculate total
         self.total = self.product.price * self.quantity
         self.extra_data["product_name"] = self.product.__str__()
 
-        self.product.stock -= self.quantity
-        self.product.save()
+        is_new = not self.pk
 
+        if is_new:
+            # New item - deduct stock
+            self.product.stock -= self.quantity
+            self.product.save()
+
+        # For updates, stock is handled in the OrderSerializer.update method
+
+        # Save the OrderItem
         super().save(*args, **kwargs)
 
     def amount_to_pay(self):
-        return self.total - self.supplement
-
+        return self.total
 
 class Order(models.Model):
     user = models.ForeignKey("users.CustomUser", on_delete=models.CASCADE)
@@ -58,16 +65,10 @@ class Order(models.Model):
         if is_new:
             # Only calculate and update balance for new orders
             # For updates, we'll handle this separately in recalculate_total_and_update_balance
-            success = self.recalculate_total_and_update_balance()
-            if not success:
-                # If balance update fails, raise an exception
-                raise ValueError("Order would result in negative balance")
+            self.recalculate_total_and_update_balance()
 
     def recalculate_total_and_update_balance(self):
-        """
-        Recalculate order total and update user balance accordingly.
-        Returns True if successful, False if it would result in negative balance.
-        """
+        """Recalculate order total and update user balance accordingly"""
         # Store original total
         original_total = self.total
 
@@ -81,21 +82,8 @@ class Order(models.Model):
 
             # Update user balance with the difference
             total_diff = new_total - original_total
-
-            # Check if this would result in negative balance
-            if total_diff < 0 and abs(total_diff) > self.user.userbalance.orders_total:
-                # Would result in negative balance
-                return False
-
             if total_diff != 0:
-                try:
-                    self.user.userbalance.deposit(total_diff, "orders_total")
-                    return True
-                except ValueError:
-                    # Deposit failed (possibly due to negative balance)
-                    return False
-
-        return True
+                self.user.userbalance.deposit(total_diff, "orders_total")
 
     def amount_to_pay(self):
         return self.total + self.supplement
