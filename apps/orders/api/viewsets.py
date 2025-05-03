@@ -20,7 +20,7 @@ class OrderViewSet(viewsets.ModelViewSet):
     serializer_class = OrderSerializer
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
     search_fields = ['name', 'description']
-    filterset_fields = ["order_items__product"]
+    filterset_fields = ["order_items__product", "user"]
 
     @transaction.atomic
     def update(self, request, *args, **kwargs):
