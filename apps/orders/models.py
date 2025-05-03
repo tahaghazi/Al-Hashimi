@@ -39,6 +39,11 @@ class Order(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     supplement = models.DecimalField(max_digits=20, decimal_places=2, default=0)
+    _original_total = None
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._original_total = self.total
 
     def __str__(self):
         return f"Order {self.id} "
@@ -47,13 +52,50 @@ class Order(models.Model):
         ordering = ["-created_at"]
 
     def save(self, *args, **kwargs):
+        is_new = not self.pk
         super().save(*args, **kwargs)
-        total = sum([item.total for item in self.order_items.all()])
 
-        if not self.total == total:
-            self.total = total
-            self.save()
-            self.user.userbalance.deposit(self.amount_to_pay(), "orders_total")
+        if is_new:
+            # Only calculate and update balance for new orders
+            # For updates, we'll handle this separately in recalculate_total_and_update_balance
+            success = self.recalculate_total_and_update_balance()
+            if not success:
+                # If balance update fails, raise an exception
+                raise ValueError("Order would result in negative balance")
+
+    def recalculate_total_and_update_balance(self):
+        """
+        Recalculate order total and update user balance accordingly.
+        Returns True if successful, False if it would result in negative balance.
+        """
+        # Store original total
+        original_total = self.total
+
+        # Calculate new total
+        new_total = sum([item.total for item in self.order_items.all()])
+
+        if original_total != new_total:
+            # Update total
+            self.total = new_total
+            super().save(update_fields=['total'])
+
+            # Update user balance with the difference
+            total_diff = new_total - original_total
+
+            # Check if this would result in negative balance
+            if total_diff < 0 and abs(total_diff) > self.user.userbalance.orders_total:
+                # Would result in negative balance
+                return False
+
+            if total_diff != 0:
+                try:
+                    self.user.userbalance.deposit(total_diff, "orders_total")
+                    return True
+                except ValueError:
+                    # Deposit failed (possibly due to negative balance)
+                    return False
+
+        return True
 
     def amount_to_pay(self):
         return self.total + self.supplement
@@ -70,14 +112,24 @@ class UserBalance(models.Model):
     @transaction.atomic(using="default")
     def deposit(self, amount, balance):
         """
-        The balance withdrawal function should be used instead of manually adjusting the balance and saving.
-        When making a withdrawal process, the user will not be able to modify until after it is completed,
+        The balance deposit function should be used instead of manually adjusting the balance and saving.
+        When making a deposit process, the user will not be able to modify until after it is completed,
         and the process will not be saved until after its success.
+
+        Raises ValueError if deposit would result in negative balance.
         """
         amount = decimal.Decimal(amount)
         obj = self.get_user_balances_queryset().select_for_update().get()
-        amount = getattr(obj, balance) + amount
-        setattr(obj, balance, amount)
+
+        # Calculate the new balance value
+        new_balance_value = getattr(obj, balance) + amount
+
+        # Check if this would result in negative balance
+        if new_balance_value < 0:
+            raise ValueError(f"Deposit would result in negative {balance}")
+
+        # Update the balance
+        setattr(obj, balance, new_balance_value)
         obj.save()
 
     def amount_to_pay(self):

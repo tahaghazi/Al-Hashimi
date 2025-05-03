@@ -1,5 +1,6 @@
 from datetime import datetime, time
 
+from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
@@ -17,10 +18,72 @@ from apps.orders.models import Order, UserBalance, OrderItem
 class OrderViewSet(viewsets.ModelViewSet):
     queryset = Order.objects.all()
     serializer_class = OrderSerializer
-    filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend, ]
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
     search_fields = ['name', 'description']
     filterset_fields = ["order_items__product"]
 
+    @transaction.atomic
+    def update(self, request, *args, **kwargs):
+        try:
+            instance = self.get_object()
+
+            # Store original order items for stock adjustment
+            original_items = {item.id: {'product': item.product, 'quantity': item.quantity}
+                              for item in instance.order_items.all()}
+
+            # Save a copy of the original order
+            original_total = instance.total
+
+            # Perform regular update
+            response = super().update(request, *args, **kwargs)
+
+            if response.status_code == status.HTTP_200_OK:
+                # Get updated instance
+                updated_instance = self.get_object()
+
+                # Recalculate total and update user balance
+                if not updated_instance.recalculate_total_and_update_balance():
+                    # If balance update fails, raise an exception to trigger rollback
+                    raise ValueError("Balance update would result in negative balance")
+
+            return response
+
+        except ValueError as e:
+            # Return error response
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+    @transaction.atomic
+    def destroy(self, request, *args, **kwargs):
+        try:
+            instance = self.get_object()
+
+            # Calculate the amount to be removed from balance
+            negative_amount = -instance.amount_to_pay()
+
+            # Check if removing this amount would cause negative balance
+            if instance.user.userbalance.orders_total + negative_amount < 0:
+                raise ValueError("Deleting this order would result in negative balance")
+
+            # Return stock for all order items
+            for item in instance.order_items.all():
+                product = item.product
+                product.stock += item.quantity
+                product.save()
+
+            # Adjust user balance before deletion
+            instance.user.userbalance.deposit(negative_amount, "orders_total")
+
+            return super().destroy(request, *args, **kwargs)
+
+        except ValueError as e:
+            # Return error response
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
 class UserBalanceViewSet(viewsets.ModelViewSet):
     serializer_class = UserBalanceSerializer
