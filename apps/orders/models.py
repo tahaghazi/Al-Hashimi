@@ -12,6 +12,7 @@ class OrderItem(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     extra_data = models.JSONField(null=True, blank=True, default=dict)
     total = models.DecimalField(max_digits=20, decimal_places=2, default=0)
+    fixed_price = models.DecimalField(max_digits=20, decimal_places=2, default=0)
 
     def __str__(self):
         return f"OrderItem {self.id} "
@@ -21,6 +22,8 @@ class OrderItem(models.Model):
 
     def save(self, *args, **kwargs):
         self.total = self.product.price * self.quantity
+        if self.fixed_price == 0:
+            self.fixed_price = self.product.price
         self.extra_data["product_name"] = self.product.__str__()
 
         self.product.stock -= self.quantity

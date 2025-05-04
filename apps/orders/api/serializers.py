@@ -28,6 +28,7 @@ class OrderSerializer(serializers.ModelSerializer):
         data = super().to_representation(instance)
         data["amount_to_pay"] = instance.amount_to_pay()
         data["user"] = UserSerializer(instance.user).data
+        data["allow_edit"] = all(item.fixed_price == item.product.price for item in instance.order_items.all())
         return data
 
 

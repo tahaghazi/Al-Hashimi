@@ -20,7 +20,7 @@ from django.contrib import admin
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
-from apps.orders.api.viewsets import OrderViewSet, UserBalanceViewSet, TodayOrderAnalyticsView
+from apps.orders.api.viewsets import OrderViewSet, UserBalanceViewSet, OrderAnalyticsView
 from apps.products.api.viewsets import ProductViewSet, BrandViewSet
 from apps.users.api.viewsets import UserViewSet
 
@@ -34,7 +34,7 @@ router.register(r'user-balance', UserBalanceViewSet, basename='user-balance')
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/', include(router.urls)),
-    path('api/orders-analytics/', TodayOrderAnalyticsView.as_view(), name='today-order-analytics'),
+    path('api/orders-analytics/', OrderAnalyticsView.as_view(), name='today-order-analytics'),
     path('api-auth/', include('rest_framework.urls', namespace='rest_framework')),
     path('api/authentication/', include('dj_rest_auth.urls')),
     path('api/authentication/registration/', include('dj_rest_auth.registration.urls')),
