@@ -1,59 +1,24 @@
 from datetime import datetime, time
-from django.db import transaction
+
 from django.db.models import Sum
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters, viewsets
 from rest_framework import status
-from rest_framework.decorators import action
-from rest_framework.generics import get_object_or_404
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.orders.api.serializers import OrderSerializer, UserBalanceSerializer, UserBalanceDepositSerializer
+from apps.orders.api.serializers import OrderSerializer, UserBalanceSerializer
 from apps.orders.models import Order, UserBalance, OrderItem
 
 
 class OrderViewSet(viewsets.ModelViewSet):
     queryset = Order.objects.all()
     serializer_class = OrderSerializer
-    filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend, ]
     search_fields = ['name', 'description']
-    filterset_fields = ["order_items__product"]
+    filterset_fields = ["order_items__product", "user"]
 
-    def update(self, request, *args, **kwargs):
-        instance = self.get_object()
-
-        # Store original order items for stock adjustment
-        original_items = {item.id: {'product': item.product, 'quantity': item.quantity}
-                          for item in instance.order_items.all()}
-
-        # Perform regular update
-        response = super().update(request, *args, **kwargs)
-
-        if response.status_code == status.HTTP_200_OK:
-            # Get updated instance
-            updated_instance = self.get_object()
-
-            # Recalculate total and update user balance
-            updated_instance.recalculate_total_and_update_balance()
-
-        return response
-
-    def destroy(self, request, *args, **kwargs):
-        instance = self.get_object()
-
-        # Return stock for all order items
-        for item in instance.order_items.all():
-            product = item.product
-            product.stock += item.quantity
-            product.save()
-
-        # Adjust user balance before deletion
-        negative_amount = -instance.amount_to_pay()
-        instance.user.userbalance.deposit(negative_amount, "orders_total")
-
-        return super().destroy(request, *args, **kwargs)
 
 class UserBalanceViewSet(viewsets.ModelViewSet):
     serializer_class = UserBalanceSerializer
@@ -63,31 +28,6 @@ class UserBalanceViewSet(viewsets.ModelViewSet):
         # Users can only see their own balance
         return UserBalance.objects.all()
 
-    @action(detail=True, methods=['post'], serializer_class=UserBalanceDepositSerializer)
-    def deposit(self, request, pk=None):
-        user_balance = get_object_or_404(UserBalance, pk=pk)
-        serializer = self.get_serializer(data=request.data)
-
-        if serializer.is_valid():
-            amount = serializer.validated_data['amount']
-            balance_type = serializer.validated_data['balance_type']
-
-            try:
-                user_balance.deposit(amount, balance_type)
-                user_balance.refresh_from_db()
-                print(user_balance.amount_to_pay())
-                return Response({
-                    'status': 'success',
-                    'message': f'{amount} deposited to {balance_type} successfully',
-                    'balance': UserBalanceSerializer(user_balance).data
-                })
-            except Exception as e:
-                return Response({
-                    'status': 'error',
-                    'message': str(e)
-                }, status=status.HTTP_400_BAD_REQUEST)
-
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 class TodayOrderAnalyticsView(APIView):
