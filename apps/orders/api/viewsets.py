@@ -6,11 +6,14 @@ from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters, viewsets
 from rest_framework import status
+from rest_framework.decorators import action
+from rest_framework.generics import get_object_or_404
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.orders.api.serializers import OrderSerializer, UserBalanceSerializer
-from apps.orders.models import Order, UserBalance, OrderItem
+from apps.orders.api.serializers import OrderSerializer, UserBalanceSerializer, UserBalanceDepositSerializer, \
+    UserBalanceNoteSerializer
+from apps.orders.models import Order, UserBalance, OrderItem, BalanceNote
 
 
 class OrderViewSet(viewsets.ModelViewSet):
@@ -41,6 +44,7 @@ class OrderViewSet(viewsets.ModelViewSet):
 
 
 
+
 class UserBalanceViewSet(viewsets.ModelViewSet):
     serializer_class = UserBalanceSerializer
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
@@ -49,6 +53,44 @@ class UserBalanceViewSet(viewsets.ModelViewSet):
         # Users can only see their own balance
         return UserBalance.objects.all()
 
+    @action(detail=True, methods=['post'], serializer_class=UserBalanceDepositSerializer)
+    def deposit(self, request, pk=None):
+        user_balance = get_object_or_404(UserBalance, pk=pk)
+        serializer = self.get_serializer(data=request.data)
+
+        if serializer.is_valid():
+            print(serializer.validated_data)
+            amount = serializer.validated_data['amount']
+            balance_type = serializer.validated_data['balance_type']
+            note = serializer.validated_data.get('note')
+
+            try:
+                user_balance.deposit(amount, balance_type)
+                user_balance.refresh_from_db()
+                BalanceNote.objects.create(user=user_balance.user, amount=amount, note=note)
+                print(user_balance.amount_to_pay())
+                return Response({
+                    'status': 'success',
+                    'message': f'{amount} deposited to {balance_type} successfully',
+                    'balance': UserBalanceSerializer(user_balance).data
+                })
+            except Exception as e:
+                return Response({
+                    'status': 'error',
+                    'message': str(e)
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class UserBalanceNoteViewSet(viewsets.ModelViewSet):
+    serializer_class = UserBalanceNoteSerializer
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields = ['user__id']
+
+    def get_queryset(self):
+        # Users can only see their own balance
+        return BalanceNote.objects.all()
 
 class OrderAnalyticsView(APIView):
     """

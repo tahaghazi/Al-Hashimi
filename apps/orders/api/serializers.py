@@ -1,7 +1,7 @@
 from django.db import transaction
 from rest_framework import serializers
 
-from apps.orders.models import Order, OrderItem, UserBalance
+from apps.orders.models import Order, OrderItem, UserBalance, BalanceNote
 from apps.products.api.serializers import ProductSerializer
 from apps.users.api.serializers import UserSerializer
 
@@ -52,7 +52,7 @@ class OrderSerializer(serializers.ModelSerializer):
 class UserBalanceSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserBalance
-        fields = ['id', 'orders_total', 'paid_amount', 'user', 'amount_to_pay']
+        fields = ['id', 'orders_total', 'paid_amount', 'amount_to_pay']
         read_only_fields = ['orders_total', 'paid_amount']
 
     def to_representation(self, instance):
@@ -60,7 +60,13 @@ class UserBalanceSerializer(serializers.ModelSerializer):
         representation['amount_to_pay'] = instance.amount_to_pay()
         return representation
 
-
 class UserBalanceDepositSerializer(serializers.Serializer):
     amount = serializers.DecimalField(max_digits=20, decimal_places=2, min_value=0.01)
     balance_type = serializers.ChoiceField(choices=['paid_amount'])
+    note = serializers.CharField(write_only=True, required=False)
+
+
+class UserBalanceNoteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BalanceNote
+        fields = "__all__"

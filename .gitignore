@@ -78,3 +78,5 @@ dmypy.json
 
 # Pyre
 .pyre/
+
+*.sqlite3
