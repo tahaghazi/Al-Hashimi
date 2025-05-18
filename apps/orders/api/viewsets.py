@@ -165,6 +165,7 @@ class OrderAnalyticsView(APIView):
             date_joined__gte=start_datetime,
             date_joined__lte=end_datetime,
             deleted=False,
+            is_staff=False,
         ).count()
 
         # Create the response data for this period
