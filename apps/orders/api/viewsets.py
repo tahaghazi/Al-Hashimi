@@ -25,8 +25,8 @@ class OrderViewSet(viewsets.ModelViewSet):
 
     def update(self, request, *args, **kwargs):
         instance = self.get_object()
-        if not instance.allow_edit:
-            return Response({"error": "You cannot edit this order"}, status=status.HTTP_400_BAD_REQUEST)
+        if not instance.user.userbalance.orders_total >= instance.amount_to_pay():
+            return Response({"error": "You can't edit this order"}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
 
