@@ -5,6 +5,7 @@ from django.db import transaction
 from django.db.models import F, Sum
 from django.db.models.functions import TruncDay, TruncHour, TruncMonth
 from django.utils import timezone
+import django_filters
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters, serializers, viewsets
 from rest_framework import status
@@ -19,6 +20,16 @@ from apps.orders.models import Order, UserBalance, OrderItem, BalanceNote, Ledge
 from apps.products.models import Product
 
 
+class OrderFilter(django_filters.FilterSet):
+    # Inclusive date-range filter on the order date (e.g. the all-bills page).
+    start = django_filters.DateFilter(field_name="created_at", lookup_expr="date__gte")
+    end = django_filters.DateFilter(field_name="created_at", lookup_expr="date__lte")
+
+    class Meta:
+        model = Order
+        fields = ["user", "order_items__product", "start", "end"]
+
+
 class OrderViewSet(viewsets.ModelViewSet):
     # select_related/prefetch_related collapse what used to be an N+1 storm:
     # the serializer touches user, balance, items, products and brands per order.
@@ -31,7 +42,7 @@ class OrderViewSet(viewsets.ModelViewSet):
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend, ]
     # Order has no name/description; search by the customer's name instead.
     search_fields = ["user__first_name"]
-    filterset_fields = ["order_items__product", "user"]
+    filterset_class = OrderFilter
 
     def update(self, request, *args, **kwargs):
         """Replace an order: reverse the old one, then create the new one.

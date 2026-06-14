@@ -195,6 +195,31 @@ class OrderApiRobustnessTests(OrdersBaseTestCase):
         self.assertEqual(resp.status_code, 400, resp.content)
 
 
+class OrderListFilterTests(OrdersBaseTestCase):
+    def _make_order(self):
+        return self.client.post("/api/orders/", self._order_payload(quantity=1, supplement="0"), format="json")
+
+    def test_filter_by_user(self):
+        self._make_order()
+        other = User.objects.create(first_name="عميل آخر")
+        resp = self.client.get(f"/api/orders/?user={self.customer.id}")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()["count"], 1)
+        resp2 = self.client.get(f"/api/orders/?user={other.id}")
+        self.assertEqual(resp2.json()["count"], 0)
+
+    def test_filter_by_date_range(self):
+        self._make_order()
+        from django.utils import timezone
+        today = timezone.localtime(timezone.now()).date().isoformat()
+        resp = self.client.get(f"/api/orders/?start={today}&end={today}")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()["count"], 1)
+        # a past window excludes today's order
+        resp2 = self.client.get("/api/orders/?start=2000-01-01&end=2000-01-02")
+        self.assertEqual(resp2.json()["count"], 0)
+
+
 class LedgerTests(OrdersBaseTestCase):
     def test_order_writes_a_ledger_entry(self):
         self.client.post(
