@@ -106,6 +106,7 @@ class UserBalanceViewSet(viewsets.ModelViewSet):
             amount = serializer.validated_data['amount']
             balance_type = serializer.validated_data['balance_type']
             note = serializer.validated_data.get('note')
+            source = serializer.validated_data.get('source', '')
             client_uuid = serializer.validated_data.get('client_uuid')
 
             # Idempotency: a replayed offline payment (same client_uuid) must be
@@ -124,7 +125,7 @@ class UserBalanceViewSet(viewsets.ModelViewSet):
                         kind=LedgerEntry.Kind.PAYMENT, note=note or "", client_uuid=client_uuid,
                     )
                     user_balance.refresh_from_db()
-                    BalanceNote.objects.create(user=user_balance.user, amount=amount, note=note or "")
+                    BalanceNote.objects.create(user=user_balance.user, amount=amount, note=note or "", source=source)
                 return Response({
                     'status': 'success',
                     'message': f'{amount} deposited to {balance_type} successfully',

@@ -73,9 +73,17 @@ class Order(models.Model):
 
 
 class BalanceNote(models.Model):
+    class PaymentSource(models.TextChoices):
+        INSTAPAY = "instapay", "انستا باي"
+        CASH = "cash", "كاش"
+        WALLET = "wallet", "محفظة"
+        BANK_TRANSFER = "bank_transfer", "تحويل بنكي"
+
     user = models.ForeignKey(get_user_model(), on_delete=models.CASCADE, related_name='notes')
-    note = models.TextField()
+    note = models.TextField(blank=True, default="")
     amount = models.DecimalField(max_digits=10, decimal_places=2)
+    # How the payment was made (cash, InstaPay, wallet, bank transfer).
+    source = models.CharField(max_length=20, choices=PaymentSource.choices, blank=True, default="")
     timestamp = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):

@@ -97,6 +97,9 @@ class UserBalanceDepositSerializer(serializers.Serializer):
     )
     balance_type = serializers.ChoiceField(choices=['paid_amount'])
     note = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    source = serializers.ChoiceField(
+        choices=BalanceNote.PaymentSource.choices, required=False, allow_blank=True
+    )
     # Idempotency key so a replayed offline payment is applied at most once.
     client_uuid = serializers.UUIDField(required=False, allow_null=True)
 

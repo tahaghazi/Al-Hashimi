@@ -119,6 +119,20 @@ class PaymentTests(OrdersBaseTestCase):
         self.assertEqual(balance.amount_to_pay(), Decimal("250.00"))
         self.assertEqual(BalanceNote.objects.filter(user=self.customer).count(), 1)
 
+    def test_payment_records_source(self):
+        self.client.post(
+            "/api/orders/", self._order_payload(quantity=3, supplement="50"), format="json"
+        )
+        balance = self._balance()
+        resp = self.client.post(
+            f"/api/user-balance/{balance.id}/deposit/",
+            {"amount": "100", "balance_type": "paid_amount", "source": "instapay"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        note = BalanceNote.objects.filter(user=self.customer).latest("timestamp")
+        self.assertEqual(note.source, "instapay")
+
     def test_balance_note_str_does_not_crash(self):
         note = BalanceNote.objects.create(
             user=self.customer, note="ملاحظة", amount=Decimal("100.00")
