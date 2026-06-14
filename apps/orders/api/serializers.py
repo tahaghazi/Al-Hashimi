@@ -1,8 +1,11 @@
+import decimal
+
 from django.db import transaction
 from rest_framework import serializers
 
 from apps.orders.models import Order, OrderItem, UserBalance, BalanceNote
 from apps.products.api.serializers import ProductSerializer
+from apps.products.models import Product
 from apps.users.api.serializers import UserSerializer
 
 
@@ -33,19 +36,33 @@ class OrderSerializer(serializers.ModelSerializer):
 
 
     def create(self, validated_data):
+        order_items_data = validated_data.pop("order_items", [])
+
         with transaction.atomic():
-            order_items_data = validated_data.pop("order_items", [])  # Extract order_items data
             order = Order.objects.create(**validated_data)
 
-            # Create OrderItem instances and associate them with the order
             order_items = []
             for item_data in order_items_data:
-                order_item = OrderItem.objects.create(**item_data)
-                order_items.append(order_item)
+                product = item_data["product"]
+                quantity = item_data["quantity"]
 
-            # Add the created order items to the ManyToMany field
+                # Lock the product row and verify availability so two concurrent
+                # withdrawals can't oversell, and stock never goes negative.
+                locked = Product.objects.select_for_update().get(pk=product.pk)
+                if quantity > locked.stock:
+                    raise serializers.ValidationError(
+                        {"order_items": f"المخزون غير كافٍ للمنتج {locked}. المتاح: {locked.stock}"}
+                    )
+                locked.stock -= quantity
+                locked.save(update_fields=["stock"])
+
+                order_items.append(OrderItem.objects.create(**item_data))
+
             order.order_items.set(order_items)
-            order.save()
+            order.recalculate_total()
+            # Add what the customer now owes (goods + scrap) to their balance,
+            # exactly once, inside this transaction.
+            order.user.userbalance.deposit(order.amount_to_pay(), "orders_total")
         return order
 
 
@@ -61,9 +78,11 @@ class UserBalanceSerializer(serializers.ModelSerializer):
         return representation
 
 class UserBalanceDepositSerializer(serializers.Serializer):
-    amount = serializers.DecimalField(max_digits=20, decimal_places=2, min_value=0.01)
+    amount = serializers.DecimalField(
+        max_digits=20, decimal_places=2, min_value=decimal.Decimal("0.01")
+    )
     balance_type = serializers.ChoiceField(choices=['paid_amount'])
-    note = serializers.CharField(write_only=True, required=False)
+    note = serializers.CharField(write_only=True, required=False, allow_blank=True)
 
 
 class UserBalanceNoteSerializer(serializers.ModelSerializer):

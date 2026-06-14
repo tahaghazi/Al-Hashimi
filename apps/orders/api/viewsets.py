@@ -1,10 +1,10 @@
 from datetime import datetime, time, timedelta
 
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import F, Sum
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework import filters, viewsets
+from rest_framework import filters, serializers, viewsets
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.generics import get_object_or_404
@@ -14,33 +14,61 @@ from rest_framework.views import APIView
 from apps.orders.api.serializers import OrderSerializer, UserBalanceSerializer, UserBalanceDepositSerializer, \
     UserBalanceNoteSerializer
 from apps.orders.models import Order, UserBalance, OrderItem, BalanceNote
+from apps.products.models import Product
 
 
 class OrderViewSet(viewsets.ModelViewSet):
-    queryset = Order.objects.all()
+    # select_related/prefetch_related collapse what used to be an N+1 storm:
+    # the serializer touches user, balance, items, products and brands per order.
+    queryset = (
+        Order.objects
+        .select_related("user", "user__userbalance")
+        .prefetch_related("order_items__product__brand")
+    )
     serializer_class = OrderSerializer
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend, ]
-    search_fields = ['name', 'description']
+    # Order has no name/description; search by the customer's name instead.
+    search_fields = ["user__first_name"]
     filterset_fields = ["order_items__product", "user"]
 
     def update(self, request, *args, **kwargs):
+        """Replace an order: reverse the old one, then create the new one.
+
+        The reversal (restock + un-charge the balance) happens BEFORE creating
+        the replacement, and the whole thing is one transaction — so a failure
+        (e.g. not enough stock for the new quantities) rolls everything back and
+        leaves the original order intact.
+        """
         instance = self.get_object()
-        if not instance.user.userbalance.orders_total >= instance.amount_to_pay():
-            return Response({"error": "You can't edit this order"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Editing only makes sense while the recorded prices still match the
+        # current product prices; otherwise the reversal math would drift.
+        if not all(item.fixed_price == item.product.price for item in instance.order_items.all()):
+            return Response(
+                {"error": "لا يمكن تعديل هذا الطلب لأن أسعار المنتجات تغيرت"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
-
             with transaction.atomic():
-                response = self.create(request, *args, **kwargs)
+                # 1) Reverse the existing order's effects.
                 instance.user.userbalance.deposit(-instance.amount_to_pay(), "orders_total")
                 for item in instance.order_items.all():
-                    item.product.stock += item.quantity
-                    item.product.save()
-
+                    Product.objects.filter(pk=item.product_id).update(
+                        stock=F("stock") + item.quantity
+                    )
                 instance.delete()
-                return response
+
+                # 2) Create the replacement (stock/balance applied by the serializer).
+                serializer = self.get_serializer(data=request.data)
+                serializer.is_valid(raise_exception=True)
+                serializer.save()
+        except serializers.ValidationError:
+            raise
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 
@@ -59,16 +87,15 @@ class UserBalanceViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(data=request.data)
 
         if serializer.is_valid():
-            print(serializer.validated_data)
             amount = serializer.validated_data['amount']
             balance_type = serializer.validated_data['balance_type']
             note = serializer.validated_data.get('note')
 
             try:
-                user_balance.deposit(amount, balance_type)
-                user_balance.refresh_from_db()
-                BalanceNote.objects.create(user=user_balance.user, amount=amount, note=note)
-                print(user_balance.amount_to_pay())
+                with transaction.atomic():
+                    user_balance.deposit(amount, balance_type)
+                    user_balance.refresh_from_db()
+                    BalanceNote.objects.create(user=user_balance.user, amount=amount, note=note or "")
                 return Response({
                     'status': 'success',
                     'message': f'{amount} deposited to {balance_type} successfully',
@@ -101,26 +128,31 @@ class OrderAnalyticsView(APIView):
     """
 
     def get(self, request, *args, **kwargs):
-        # Get current date
-        now = timezone.now()
+        # Use the active timezone so the day/month/year boundaries line up with
+        # the local calendar. Building these as timezone-aware datetimes keeps
+        # the date-range filtering correct under USE_TZ=True.
+        now = timezone.localtime(timezone.now())
         today = now.date()
+        tz = timezone.get_current_timezone()
 
-        # Define periods
+        def aware(dt):
+            return timezone.make_aware(dt, tz)
+
         # Today period
-        today_start = datetime.combine(today, time.min)
-        today_end = datetime.combine(today, time.max)
+        today_start = aware(datetime.combine(today, time.min))
+        today_end = aware(datetime.combine(today, time.max))
 
         # This month period
-        month_start = datetime(today.year, today.month, 1, 0, 0, 0)
+        month_start = aware(datetime(today.year, today.month, 1, 0, 0, 0))
         if today.month == 12:
-            next_month = datetime(today.year + 1, 1, 1, 0, 0, 0)
+            next_month = aware(datetime(today.year + 1, 1, 1, 0, 0, 0))
         else:
-            next_month = datetime(today.year, today.month + 1, 1, 0, 0, 0)
+            next_month = aware(datetime(today.year, today.month + 1, 1, 0, 0, 0))
         month_end = next_month - timedelta(seconds=1)
 
         # This year period
-        year_start = datetime(today.year, 1, 1, 0, 0, 0)
-        year_end = datetime(today.year, 12, 31, 23, 59, 59)
+        year_start = aware(datetime(today.year, 1, 1, 0, 0, 0))
+        year_end = aware(datetime(today.year, 12, 31, 23, 59, 59))
 
         # Get user model
         from django.contrib.auth import get_user_model
@@ -168,11 +200,12 @@ class OrderAnalyticsView(APIView):
             is_staff=False,
         ).count()
 
-        # Create the response data for this period
+        # Keep money as Decimal end to end; DRF renders it as a JSON number
+        # (COERCE_DECIMAL_TO_STRING=False) without reintroducing float error.
         return {
             "products_count": products_count,
-            "products_total": float(sum_products),
-            "supplements_total": float(sum_supplements),
-            "amount_to_pay_total": float(sum_amount_to_pay),
+            "products_total": sum_products,
+            "supplements_total": sum_supplements,
+            "amount_to_pay_total": sum_amount_to_pay,
             "users_created": users_created,
         }

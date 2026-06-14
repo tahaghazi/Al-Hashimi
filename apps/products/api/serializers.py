@@ -18,13 +18,11 @@ class ProductSerializer(serializers.ModelSerializer):
 
         # Only check for duplicates on create or when name/brand is updated
         if name:
-            print('attrs', attrs)
             queryset = Product.objects.filter(
                 name=attrs['name'],
                 brand=brand,
                 deleted=False
             )
-            print(queryset)
 
             # Exclude current instance on update
             if self.instance:

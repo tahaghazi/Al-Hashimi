@@ -22,18 +22,18 @@ class OrderItem(models.Model):
         ordering = ["-created_at"]
 
     def save(self, *args, **kwargs):
+        # Computing the line total and locking in the price at order time is
+        # idempotent, so it is safe to do on every save. Stock is intentionally
+        # NOT adjusted here: it used to be decremented on every save() call,
+        # which double-counted whenever an item was re-saved. Stock changes now
+        # live in the serializer/viewset where they happen exactly once, inside
+        # a transaction, with an availability check.
         self.total = self.product.price * self.quantity
         if self.fixed_price == 0:
             self.fixed_price = self.product.price
-        self.extra_data["product_name"] = self.product.__str__()
-
-        self.product.stock -= self.quantity
-        self.product.save()
-
+        self.extra_data = self.extra_data or {}
+        self.extra_data["product_name"] = str(self.product)
         super().save(*args, **kwargs)
-
-    def amount_to_pay(self):
-        return self.total - self.supplement
 
 
 class Order(models.Model):
@@ -50,14 +50,17 @@ class Order(models.Model):
     class Meta:
         ordering = ["-created_at"]
 
-    def save(self, *args, **kwargs):
-        super().save(*args, **kwargs)
-        total = sum([item.total for item in self.order_items.all()])
+    def recalculate_total(self):
+        """Recompute and persist `total` from the attached order items.
 
-        if not self.total == total:
-            self.total = total
-            self.save()
-            self.user.userbalance.deposit(self.amount_to_pay(), "orders_total")
+        Kept out of save() on purpose: the old save() recomputed the total and
+        recursively re-saved itself while also poking the user's balance, which
+        made every save risk double-counting a customer's debt. Balance changes
+        are now driven explicitly from the serializer/viewset.
+        """
+        self.total = sum((item.total for item in self.order_items.all()), decimal.Decimal("0"))
+        self.save(update_fields=["total"])
+        return self.total
 
     def amount_to_pay(self):
         return self.total + self.supplement
@@ -70,7 +73,7 @@ class BalanceNote(models.Model):
     timestamp = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f"Note for {self.user.username}'s {self.balance_type} balance: {self.amount}"
+        return f"Note for {self.user}: {self.amount}"
 
 
 class UserBalance(models.Model):
