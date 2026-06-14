@@ -13,7 +13,7 @@ from rest_framework.views import APIView
 
 from apps.orders.api.serializers import OrderSerializer, UserBalanceSerializer, UserBalanceDepositSerializer, \
     UserBalanceNoteSerializer
-from apps.orders.models import Order, UserBalance, OrderItem, BalanceNote
+from apps.orders.models import Order, UserBalance, OrderItem, BalanceNote, LedgerEntry
 from apps.products.models import Product
 
 
@@ -52,7 +52,10 @@ class OrderViewSet(viewsets.ModelViewSet):
         try:
             with transaction.atomic():
                 # 1) Reverse the existing order's effects.
-                instance.user.userbalance.deposit(-instance.amount_to_pay(), "orders_total")
+                instance.user.userbalance.deposit(
+                    -instance.amount_to_pay(), "orders_total",
+                    kind=LedgerEntry.Kind.ORDER_REVERSAL, note=f"تعديل الطلب #{instance.id}",
+                )
                 for item in instance.order_items.all():
                     Product.objects.filter(pk=item.product_id).update(
                         stock=F("stock") + item.quantity
@@ -90,10 +93,23 @@ class UserBalanceViewSet(viewsets.ModelViewSet):
             amount = serializer.validated_data['amount']
             balance_type = serializer.validated_data['balance_type']
             note = serializer.validated_data.get('note')
+            client_uuid = serializer.validated_data.get('client_uuid')
+
+            # Idempotency: a replayed offline payment (same client_uuid) must be
+            # applied at most once — acknowledge it without re-charging.
+            if client_uuid and LedgerEntry.objects.filter(client_uuid=client_uuid).exists():
+                return Response({
+                    'status': 'success',
+                    'message': 'already processed',
+                    'balance': UserBalanceSerializer(user_balance).data,
+                })
 
             try:
                 with transaction.atomic():
-                    user_balance.deposit(amount, balance_type)
+                    user_balance.deposit(
+                        amount, balance_type,
+                        kind=LedgerEntry.Kind.PAYMENT, note=note or "", client_uuid=client_uuid,
+                    )
                     user_balance.refresh_from_db()
                     BalanceNote.objects.create(user=user_balance.user, amount=amount, note=note or "")
                 return Response({

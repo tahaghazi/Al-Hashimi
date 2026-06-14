@@ -10,13 +10,14 @@ These tests pin down the intended behavior of the core money/stock flows:
 
 Run with:  .venv/Scripts/python.exe manage.py test apps.orders
 """
+import uuid
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from apps.orders.models import Order, OrderItem, BalanceNote
+from apps.orders.models import Order, OrderItem, BalanceNote, LedgerEntry
 from apps.products.models import Brand, Product
 
 User = get_user_model()
@@ -169,3 +170,68 @@ class OrderApiRobustnessTests(OrdersBaseTestCase):
         self.assertEqual(Decimal(str(today["supplements_total"])), Decimal("50"))
         self.assertEqual(Decimal(str(today["amount_to_pay_total"])), Decimal("350"))
         self.assertEqual(today["products_count"], 3)
+
+
+class LedgerTests(OrdersBaseTestCase):
+    def test_order_writes_a_ledger_entry(self):
+        self.client.post(
+            "/api/orders/", self._order_payload(quantity=3, supplement="50"), format="json"
+        )
+        entry = LedgerEntry.objects.get(user=self.customer, kind=LedgerEntry.Kind.ORDER)
+        self.assertEqual(entry.field, "orders_total")
+        self.assertEqual(entry.amount, Decimal("350.00"))
+
+    def test_recompute_from_ledger_matches_cached_balance(self):
+        self.client.post(
+            "/api/orders/", self._order_payload(quantity=3, supplement="50"), format="json"
+        )
+        balance = self._balance()
+        self.client.post(
+            f"/api/user-balance/{balance.id}/deposit/",
+            {"amount": "120", "balance_type": "paid_amount"},
+            format="json",
+        )
+        balance = self._balance()
+
+        rebuilt = balance.recompute_from_ledger()
+        self.assertEqual(rebuilt["orders_total"], balance.orders_total)
+        self.assertEqual(rebuilt["paid_amount"], balance.paid_amount)
+
+
+class IdempotencyTests(OrdersBaseTestCase):
+    def test_replayed_order_uuid_charges_once(self):
+        payload = self._order_payload(quantity=3, supplement="50")
+        payload["client_uuid"] = str(uuid.uuid4())
+
+        first = self.client.post("/api/orders/", payload, format="json")
+        self.assertEqual(first.status_code, 201, first.content)
+
+        # Same request again (as an offline replay would send).
+        second = self.client.post("/api/orders/", payload, format="json")
+        self.assertIn(second.status_code, (200, 201), second.content)
+
+        self.assertEqual(Order.objects.count(), 1)
+        self.assertEqual(first.json()["id"], second.json()["id"])
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 7)  # decremented once, not twice
+        self.assertEqual(self._balance().orders_total, Decimal("350.00"))
+
+    def test_replayed_payment_uuid_applies_once(self):
+        self.client.post(
+            "/api/orders/", self._order_payload(quantity=3, supplement="50"), format="json"
+        )
+        balance = self._balance()
+        key = str(uuid.uuid4())
+        body = {"amount": "100", "balance_type": "paid_amount", "client_uuid": key}
+
+        first = self.client.post(f"/api/user-balance/{balance.id}/deposit/", body, format="json")
+        self.assertEqual(first.status_code, 200, first.content)
+        second = self.client.post(f"/api/user-balance/{balance.id}/deposit/", body, format="json")
+        self.assertEqual(second.status_code, 200, second.content)
+
+        balance = self._balance()
+        self.assertEqual(balance.paid_amount, Decimal("100.00"))  # applied once
+        self.assertEqual(
+            LedgerEntry.objects.filter(user=self.customer, kind=LedgerEntry.Kind.PAYMENT).count(),
+            1,
+        )

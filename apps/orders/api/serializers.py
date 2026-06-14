@@ -3,7 +3,7 @@ import decimal
 from django.db import transaction
 from rest_framework import serializers
 
-from apps.orders.models import Order, OrderItem, UserBalance, BalanceNote
+from apps.orders.models import Order, OrderItem, UserBalance, BalanceNote, LedgerEntry
 from apps.products.api.serializers import ProductSerializer
 from apps.products.models import Product
 from apps.users.api.serializers import UserSerializer
@@ -21,6 +21,9 @@ class OrderItemSerializer(serializers.ModelSerializer):
 
 class OrderSerializer(serializers.ModelSerializer):
     order_items = OrderItemSerializer(many=True, )
+    # Drop the default UniqueValidator so a replayed offline order (same UUID)
+    # is handled idempotently in create() instead of being rejected as a 400.
+    client_uuid = serializers.UUIDField(required=False, allow_null=True, validators=[])
 
     class Meta:
         model = Order
@@ -37,8 +40,16 @@ class OrderSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         order_items_data = validated_data.pop("order_items", [])
+        client_uuid = validated_data.get("client_uuid")
 
         with transaction.atomic():
+            # Idempotency: a replayed offline order (same client_uuid) must not
+            # charge stock or balance again — return the order already recorded.
+            if client_uuid:
+                existing = Order.objects.filter(client_uuid=client_uuid).first()
+                if existing is not None:
+                    return existing
+
             order = Order.objects.create(**validated_data)
 
             order_items = []
@@ -61,8 +72,11 @@ class OrderSerializer(serializers.ModelSerializer):
             order.order_items.set(order_items)
             order.recalculate_total()
             # Add what the customer now owes (goods + scrap) to their balance,
-            # exactly once, inside this transaction.
-            order.user.userbalance.deposit(order.amount_to_pay(), "orders_total")
+            # exactly once, inside this transaction, and record it in the ledger.
+            order.user.userbalance.deposit(
+                order.amount_to_pay(), "orders_total",
+                kind=LedgerEntry.Kind.ORDER, order=order,
+            )
         return order
 
 
@@ -83,6 +97,8 @@ class UserBalanceDepositSerializer(serializers.Serializer):
     )
     balance_type = serializers.ChoiceField(choices=['paid_amount'])
     note = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    # Idempotency key so a replayed offline payment is applied at most once.
+    client_uuid = serializers.UUIDField(required=False, allow_null=True)
 
 
 class UserBalanceNoteSerializer(serializers.ModelSerializer):
