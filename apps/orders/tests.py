@@ -171,6 +171,29 @@ class OrderApiRobustnessTests(OrdersBaseTestCase):
         self.assertEqual(Decimal(str(today["amount_to_pay_total"])), Decimal("350"))
         self.assertEqual(today["products_count"], 3)
 
+    def test_analytics_range_mode_returns_totals_and_series(self):
+        self.client.post(
+            "/api/orders/", self._order_payload(quantity=3, supplement="50"), format="json"
+        )
+        for period, gran in [("day", "hour"), ("week", "day"), ("month", "day"), ("year", "month")]:
+            resp = self.client.get(f"/api/orders-analytics/?period={period}")
+            self.assertEqual(resp.status_code, 200, resp.content)
+            body = resp.json()
+            self.assertEqual(body["granularity"], gran)
+            self.assertIn("totals", body)
+            self.assertTrue(len(body["series"]) > 0)
+            # the order we created falls in every one of these ranges
+            self.assertEqual(Decimal(str(body["totals"]["amount_to_pay_total"])), Decimal("350"))
+
+    def test_analytics_custom_range(self):
+        resp = self.client.get("/api/orders-analytics/?start=2026-06-01&end=2026-06-14")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(len(resp.json()["series"]), 14)  # 14 daily buckets
+
+    def test_analytics_invalid_custom_range_is_400(self):
+        resp = self.client.get("/api/orders-analytics/?start=bad&end=worse")
+        self.assertEqual(resp.status_code, 400, resp.content)
+
 
 class LedgerTests(OrdersBaseTestCase):
     def test_order_writes_a_ledger_entry(self):

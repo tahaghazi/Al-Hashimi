@@ -1,7 +1,9 @@
 from datetime import datetime, time, timedelta
 
+from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.db.models import F, Sum
+from django.db.models.functions import TruncDay, TruncHour, TruncMonth
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters, serializers, viewsets
@@ -135,53 +137,140 @@ class UserBalanceNoteViewSet(viewsets.ModelViewSet):
         # Users can only see their own balance
         return BalanceNote.objects.all()
 
+MONTHS_AR = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو",
+             "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"]
+
+
 class OrderAnalyticsView(APIView):
     """
-    API view to return analytics for orders.
-    Returns analytics for today, this month, and this year periods.
-    Analytics include sum of products purchased, sum of supplements, sum of amount to pay,
-    and count of users created within each period.
+    Order analytics.
+
+    - No params: legacy response { today, this_month, this_year } used by the
+      home dashboard.
+    - ?period=day|week|month|year  OR  ?start=YYYY-MM-DD&end=YYYY-MM-DD :
+      returns { period, start, end, totals, series } where `series` is a
+      time-bucketed breakdown for charting.
     """
 
     def get(self, request, *args, **kwargs):
-        # Use the active timezone so the day/month/year boundaries line up with
-        # the local calendar. Building these as timezone-aware datetimes keeps
-        # the date-range filtering correct under USE_TZ=True.
         now = timezone.localtime(timezone.now())
+        self.tz = timezone.get_current_timezone()
         today = now.date()
-        tz = timezone.get_current_timezone()
-
-        def aware(dt):
-            return timezone.make_aware(dt, tz)
-
-        # Today period
-        today_start = aware(datetime.combine(today, time.min))
-        today_end = aware(datetime.combine(today, time.max))
-
-        # This month period
-        month_start = aware(datetime(today.year, today.month, 1, 0, 0, 0))
-        if today.month == 12:
-            next_month = aware(datetime(today.year + 1, 1, 1, 0, 0, 0))
-        else:
-            next_month = aware(datetime(today.year, today.month + 1, 1, 0, 0, 0))
-        month_end = next_month - timedelta(seconds=1)
-
-        # This year period
-        year_start = aware(datetime(today.year, 1, 1, 0, 0, 0))
-        year_end = aware(datetime(today.year, 12, 31, 23, 59, 59))
-
-        # Get user model
-        from django.contrib.auth import get_user_model
         User = get_user_model()
 
-        # Calculate analytics for each period
-        response_data = {
-            "today": self._calculate_analytics(today_start, today_end, User),
-            "this_month": self._calculate_analytics(month_start, month_end, User),
-            "this_year": self._calculate_analytics(year_start, year_end, User)
-        }
+        period = request.GET.get("period")
+        start_param = request.GET.get("start")
+        end_param = request.GET.get("end")
 
-        return Response(response_data, status=status.HTTP_200_OK)
+        # ---- legacy mode (home dashboard) ----
+        if not period and not start_param:
+            ts, te = self._day_bounds(today, today)
+            ms, me = self._day_bounds(today.replace(day=1), today)
+            ys, ye = self._day_bounds(today.replace(month=1, day=1), today)
+            return Response({
+                "today": self._calculate_analytics(ts, te, User),
+                "this_month": self._calculate_analytics(ms, me, User),
+                "this_year": self._calculate_analytics(ys, ye, User),
+            })
+
+        # ---- filtered range mode ----
+        try:
+            start_dt, end_dt, gran = self._resolve_range(period, start_param, end_param, today)
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            "period": period or "custom",
+            "start": start_dt.date().isoformat(),
+            "end": end_dt.date().isoformat(),
+            "granularity": gran,
+            "totals": self._calculate_analytics(start_dt, end_dt, User),
+            "series": self._series(start_dt, end_dt, gran),
+        })
+
+    # ---------------- helpers ----------------
+    def _aware(self, dt):
+        return timezone.make_aware(dt, self.tz)
+
+    def _day_bounds(self, start_date, end_date):
+        return (self._aware(datetime.combine(start_date, time.min)),
+                self._aware(datetime.combine(end_date, time.max)))
+
+    def _resolve_range(self, period, start_param, end_param, today):
+        if period == "day":
+            return (*self._day_bounds(today, today), "hour")
+        if period == "week":
+            return (*self._day_bounds(today - timedelta(days=6), today), "day")
+        if period == "month":
+            return (*self._day_bounds(today.replace(day=1), today), "day")
+        if period == "year":
+            return (*self._day_bounds(today.replace(month=1, day=1), today), "month")
+
+        # custom range
+        if not (start_param and end_param):
+            raise ValueError("custom range requires start and end (YYYY-MM-DD)")
+        try:
+            s = datetime.strptime(start_param, "%Y-%m-%d").date()
+            e = datetime.strptime(end_param, "%Y-%m-%d").date()
+        except ValueError:
+            raise ValueError("invalid date format, expected YYYY-MM-DD")
+        if e < s:
+            s, e = e, s
+        span = (e - s).days
+        gran = "day" if span <= 92 else "month"
+        return (*self._day_bounds(s, e), gran)
+
+    def _series(self, start_dt, end_dt, gran):
+        trunc = {"hour": TruncHour, "day": TruncDay, "month": TruncMonth}[gran]
+        keyfmt = {"hour": "%Y-%m-%d %H", "day": "%Y-%m-%d", "month": "%Y-%m"}[gran]
+
+        orders = (Order.objects
+                  .filter(created_at__gte=start_dt, created_at__lte=end_dt)
+                  .annotate(b=trunc("created_at", tzinfo=self.tz))
+                  .values("b").annotate(pt=Sum("total"), st=Sum("supplement")))
+        omap = {timezone.localtime(o["b"]).strftime(keyfmt): o for o in orders}
+
+        items = (OrderItem.objects
+                 .filter(order__created_at__gte=start_dt, order__created_at__lte=end_dt)
+                 .annotate(b=trunc("order__created_at", tzinfo=self.tz))
+                 .values("b").annotate(qc=Sum("quantity")))
+        imap = {timezone.localtime(i["b"]).strftime(keyfmt): (i["qc"] or 0) for i in items}
+
+        out = []
+        for key, label in self._buckets(start_dt, end_dt, gran):
+            o = omap.get(key)
+            pt = (o["pt"] if o else 0) or 0
+            st = (o["st"] if o else 0) or 0
+            out.append({
+                "label": label,
+                "products_total": pt,
+                "supplements_total": st,
+                "amount_to_pay_total": pt + st,
+                "products_count": imap.get(key, 0),
+            })
+        return out
+
+    def _buckets(self, start_dt, end_dt, gran):
+        buckets = []
+        if gran == "hour":
+            cur = start_dt
+            while cur <= end_dt:
+                buckets.append((cur.strftime("%Y-%m-%d %H"), cur.strftime("%H:00")))
+                cur += timedelta(hours=1)
+        elif gran == "day":
+            cur = start_dt
+            while cur.date() <= end_dt.date():
+                buckets.append((cur.strftime("%Y-%m-%d"), cur.strftime("%d/%m")))
+                cur += timedelta(days=1)
+        else:  # month
+            y, m = start_dt.year, start_dt.month
+            while (y, m) <= (end_dt.year, end_dt.month):
+                buckets.append((f"{y:04d}-{m:02d}", MONTHS_AR[m - 1]))
+                m += 1
+                if m > 12:
+                    m = 1
+                    y += 1
+        return buckets
 
     def _calculate_analytics(self, start_datetime, end_datetime, User):
         """
