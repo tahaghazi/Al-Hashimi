@@ -9,35 +9,40 @@ https://docs.djangoproject.com/en/5.1/topics/settings/
 For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.1/ref/settings/
 """
-import asyncio
 import datetime
+import os
 from pathlib import Path
-from uuid import uuid4
 
-import django
-from django.utils.encoding import force_str, smart_str
-from django.utils.translation import gettext, gettext_lazy
-
-django.utils.encoding.smart_text = smart_str
-django.utils.encoding.force_text = force_str
-django.utils.translation.ugettext = gettext
-django.utils.translation.ugettext_lazy = gettext_lazy
-
+from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Load environment variables from a local .env file if present. Real secrets
+# live there (and in the server environment), never in source control.
+load_dotenv(BASE_DIR / ".env")
 
-# Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/5.1/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-r14_0+r^tq2t_9&n!jqpknrj!855ceo0++$cg==ka2il%*#r@u'
+def env_bool(name, default=False):
+    return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_list(name, default=""):
+    return [item.strip() for item in os.getenv(name, default).split(",") if item.strip()]
+
+
+# SECURITY WARNING: keep the secret key secret! Set DJANGO_SECRET_KEY in the
+# environment for any real deployment. The fallback only exists so the dev
+# server and tests run out of the box.
+SECRET_KEY = os.getenv(
+    "DJANGO_SECRET_KEY",
+    "django-insecure-r14_0+r^tq2t_9&n!jqpknrj!855ceo0++$cg==ka2il%*#r@u",
+)
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = env_bool("DJANGO_DEBUG", default=True)
 
-ALLOWED_HOSTS = ["*"]
+ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", default="localhost,127.0.0.1")
 
 
 # Application definition
@@ -75,8 +80,8 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    # "allauth.account.middleware.AccountMiddleware",
-
+    # Required by django-allauth (>= 0.55).
+    "allauth.account.middleware.AccountMiddleware",
 ]
 
 ROOT_URLCONF = 'config.urls'
@@ -144,7 +149,9 @@ USE_TZ = True
 # STATIC & MEDIA FILES SETTINGS
 # ==============================================================================
 
-STATICFILES_DIRS = [BASE_DIR / "static"]
+# Only include the project static dir if it actually exists, to avoid the
+# staticfiles.W004 warning on a fresh checkout.
+STATICFILES_DIRS = [BASE_DIR / "static"] if (BASE_DIR / "static").exists() else []
 
 STATIC_URL = "/static/"
 
@@ -180,44 +187,38 @@ REST_FRAMEWORK = {
     ),
 }
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": datetime.timedelta(days=7),
+    # Short-lived access token; the refresh token (rotated) keeps sessions alive.
+    "ACCESS_TOKEN_LIFETIME": datetime.timedelta(minutes=30),
     "REFRESH_TOKEN_LIFETIME": datetime.timedelta(days=7),
     "AUTH_HEADER_TYPES": ("Bearer", "JWT", "Token"),
     "ROTATE_REFRESH_TOKENS": True,
 }
 
-REST_USE_JWT = True
-
-REST_AUTH_REGISTER_SERIALIZERS = {
-    # "REGISTER_SERIALIZER": "core.serializers.RegisterSerializer",
+# dj-rest-auth 7.x configuration (replaces the old REST_USE_JWT /
+# REST_AUTH_*_SERIALIZERS module-level settings).
+REST_AUTH = {
+    "USE_JWT": True,
+    "SESSION_LOGIN": False,
+    "JWT_AUTH_HTTPONLY": False,  # return the refresh token in the body
+    # Keep the legacy access_token/refresh_token response keys for the frontend.
+    "JWT_SERIALIZER": "apps.users.api.serializers.CustomJWTSerializer",
 }
 
-REST_AUTH_SERIALIZERS = {
-    # "USER_DETAILS_SERIALIZER": "src.apps.authentication.custom_account.api.serializers.UserDetailsSerializer",
-    # "LOGIN_SERIALIZER": "apps.users.api.serializers.CustomLoginSerializer",
-    # "PASSWORD_RESET_SERIALIZER": "src.apps.authentication.custom_account.api.serializers.CustomPasswordResetSerializer",  # noqa
-}
-
-REST_USE_JWT = True
 SITE_ID = 1
 
 # ==============================================================================
-# DJANGO ALLAUTH SETTINGS
+# DJANGO ALLAUTH SETTINGS  (new-style settings for allauth >= 65)
 # ==============================================================================
-
-ACCOUNT_EMAIL_REQUIRED = True
 
 ACCOUNT_EMAIL_VERIFICATION = "optional"
 
-ACCOUNT_AUTHENTICATION_METHOD = "username"
+# Log in by username; email is collected at signup but optional.
+ACCOUNT_LOGIN_METHODS = {"username"}
+ACCOUNT_SIGNUP_FIELDS = ["username*", "email", "password1"]
 
 ACCOUNT_USER_DISPLAY = lambda user: user.get_full_name()  # noqa
 
-ACCOUNT_SIGNUP_PASSWORD_ENTER_TWICE = False
-
 ACCOUNT_UNIQUE_EMAIL = False
-
-ACCOUNT_USERNAME_REQUIRED = False
 
 # =========================================================
 # EMAIL SETTINGS
@@ -234,31 +235,16 @@ AUTHENTICATION_BACKENDS = [
     'allauth.account.auth_backends.AuthenticationBackend',
 ]
 
-CORS_ALLOW_ALL_ORIGINS = True
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    'https://7b1c-154-177-231-215.ngrok-free.app',
-
-]
-CSRF_TRUSTED_ORIGINS = [
-    'http://localhost:3000',
-    'http://127.0.0.1:3000',
-    'https://7b1c-154-177-231-215.ngrok-free.app',
-]
-# In settings.py
-CORS_ALLOW_METHODS = [
-    'DELETE',
-    'GET',
-    'OPTIONS',
-    'PATCH',
-    'POST',
-    'PUT',
-]
-# ==============================================================================
-# CHANNELS SETTINGS
-# ==============================================================================
-
-CHANNEL_LAYERS = {"default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}}
+# CORS / CSRF: allow-all only in DEBUG; otherwise restrict to an explicit list
+# from the environment (comma-separated origins).
+CORS_ALLOW_ALL_ORIGINS = env_bool("CORS_ALLOW_ALL_ORIGINS", default=DEBUG)
+CORS_ALLOWED_ORIGINS = env_list(
+    "CORS_ALLOWED_ORIGINS", default="http://localhost:3000,http://127.0.0.1:3000"
+)
+CSRF_TRUSTED_ORIGINS = env_list(
+    "CSRF_TRUSTED_ORIGINS", default="http://localhost:3000,http://127.0.0.1:3000"
+)
+CORS_ALLOW_METHODS = ["DELETE", "GET", "OPTIONS", "PATCH", "POST", "PUT"]
 
 AUTH_USER_MODEL = "users.CustomUser"
 
