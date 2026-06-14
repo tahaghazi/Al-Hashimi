@@ -1,0 +1,26 @@
+# Render Blueprint for the Al-Hashimi Django backend.
+# Render dashboard -> New -> Blueprint -> pick this repo. HTTPS is automatic.
+services:
+  - type: web
+    name: al-hashimi-api
+    runtime: python
+    plan: free
+    region: frankfurt # closest free region to Egypt; change if you prefer
+    buildCommand: "./build.sh"
+    startCommand: "gunicorn config.wsgi:application"
+    healthCheckPath: /admin/login/
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.13.2"
+      - key: DJANGO_DEBUG
+        value: "false"
+      - key: DJANGO_SECRET_KEY
+        generateValue: true # Render generates a strong secret for you
+      # RENDER_EXTERNAL_HOSTNAME is injected automatically and trusted in settings.
+      # After the frontend is deployed, set this to its URL to lock CORS down:
+      - key: CORS_ALLOW_ALL_ORIGINS
+        value: "true" # ok for testing; set to "false" + the line below for prod
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false # e.g. https://al-hashimi-web.onrender.com
+      - key: CSRF_TRUSTED_ORIGINS
+        sync: false # e.g. https://al-hashimi-web.onrender.com
