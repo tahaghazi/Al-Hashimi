@@ -202,9 +202,10 @@ REST_FRAMEWORK = {
     ),
 }
 SIMPLE_JWT = {
-    # Short-lived access token; the refresh token (rotated) keeps sessions alive.
-    "ACCESS_TOKEN_LIFETIME": datetime.timedelta(minutes=30),
-    "REFRESH_TOKEN_LIFETIME": datetime.timedelta(days=7),
+    # Long-lived token so an operator logs in once and keeps working offline for
+    # up to a year without needing the network to re-authenticate.
+    "ACCESS_TOKEN_LIFETIME": datetime.timedelta(days=365),
+    "REFRESH_TOKEN_LIFETIME": datetime.timedelta(days=365),
     "AUTH_HEADER_TYPES": ("Bearer", "JWT", "Token"),
     "ROTATE_REFRESH_TOKENS": True,
 }
