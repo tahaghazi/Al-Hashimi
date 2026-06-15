@@ -71,8 +71,13 @@ class OrderSerializer(serializers.ModelSerializer):
 
             order.order_items.set(order_items)
             order.recalculate_total()
-            # Add what the customer now owes (goods + scrap) to their balance,
-            # exactly once, inside this transaction, and record it in the ledger.
+            # The final amount (goods + scrap - discount) must stay above zero.
+            if order.amount_to_pay() <= 0:
+                raise serializers.ValidationError(
+                    {"discount": "المبلغ النهائي للفاتورة يجب أن يكون أكبر من صفر"}
+                )
+            # Add what the customer now owes to their balance, exactly once,
+            # inside this transaction, and record it in the ledger.
             order.user.userbalance.deposit(
                 order.amount_to_pay(), "orders_total",
                 kind=LedgerEntry.Kind.ORDER, order=order,

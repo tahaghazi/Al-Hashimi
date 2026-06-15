@@ -69,6 +69,24 @@ class OrderCreationTests(OrdersBaseTestCase):
         self.assertEqual(balance.orders_total, Decimal("350.00"))
         self.assertEqual(balance.amount_to_pay(), Decimal("350.00"))
 
+    def test_discount_reduces_amount_to_pay(self):
+        payload = self._order_payload(quantity=3, supplement="50")
+        payload["discount"] = "100"
+        resp = self.client.post("/api/orders/", payload, format="json")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        # 300 goods + 50 scrap - 100 discount = 250
+        self.assertEqual(self._balance().orders_total, Decimal("250.00"))
+        self.assertEqual(self._balance().amount_to_pay(), Decimal("250.00"))
+
+    def test_discount_cannot_make_bill_zero_or_negative(self):
+        payload = self._order_payload(quantity=3, supplement="50")
+        payload["discount"] = "350"  # equals goods + scrap -> final 0
+        resp = self.client.post("/api/orders/", payload, format="json")
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(Order.objects.count(), 0)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 10)  # rolled back
+
     def test_insufficient_stock_returns_400_and_changes_nothing(self):
         resp = self.client.post(
             "/api/orders/", self._order_payload(quantity=999), format="json"

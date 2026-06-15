@@ -45,6 +45,7 @@ class Order(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     supplement = models.DecimalField(max_digits=20, decimal_places=2, default=0)
+    discount = models.DecimalField(max_digits=20, decimal_places=2, default=0)
     # Client-generated idempotency key. An order created offline carries this
     # UUID so that replaying the request when connectivity returns finds the
     # existing order instead of charging the customer (and stock) twice.
@@ -69,7 +70,7 @@ class Order(models.Model):
         return self.total
 
     def amount_to_pay(self):
-        return self.total + self.supplement
+        return self.total + self.supplement - self.discount
 
 
 class BalanceNote(models.Model):

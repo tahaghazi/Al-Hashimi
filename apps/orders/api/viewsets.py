@@ -239,7 +239,7 @@ class OrderAnalyticsView(APIView):
         orders = (Order.objects
                   .filter(created_at__gte=start_dt, created_at__lte=end_dt)
                   .annotate(b=trunc("created_at", tzinfo=self.tz))
-                  .values("b").annotate(pt=Sum("total"), st=Sum("supplement")))
+                  .values("b").annotate(pt=Sum("total"), st=Sum("supplement"), dc=Sum("discount")))
         omap = {timezone.localtime(o["b"]).strftime(keyfmt): o for o in orders}
 
         items = (OrderItem.objects
@@ -253,11 +253,13 @@ class OrderAnalyticsView(APIView):
             o = omap.get(key)
             pt = (o["pt"] if o else 0) or 0
             st = (o["st"] if o else 0) or 0
+            dc = (o["dc"] if o else 0) or 0
             out.append({
                 "label": label,
                 "products_total": pt,
                 "supplements_total": st,
-                "amount_to_pay_total": pt + st,
+                "discounts_total": dc,
+                "amount_to_pay_total": pt + st - dc,
                 "products_count": imap.get(key, 0),
             })
         return out
@@ -300,8 +302,11 @@ class OrderAnalyticsView(APIView):
         # Get the sum of all supplements
         sum_supplements = period_orders.aggregate(sum=Sum('supplement'))['sum'] or 0
 
-        # Calculate the total amount to pay (total + supplement)
-        sum_amount_to_pay = sum_products + sum_supplements
+        # Sum of discounts granted
+        sum_discounts = period_orders.aggregate(sum=Sum('discount'))['sum'] or 0
+
+        # Final amount to pay (total + supplement - discount)
+        sum_amount_to_pay = sum_products + sum_supplements - sum_discounts
 
         # Get count of products purchased in the period
         order_items = OrderItem.objects.filter(
@@ -323,6 +328,7 @@ class OrderAnalyticsView(APIView):
             "products_count": products_count,
             "products_total": sum_products,
             "supplements_total": sum_supplements,
+            "discounts_total": sum_discounts,
             "amount_to_pay_total": sum_amount_to_pay,
             "users_created": users_created,
         }
