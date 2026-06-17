@@ -41,6 +41,24 @@ class CustomUser(AbstractUser):
         return self.first_name
 
 
+class Backup(models.Model):
+    """Metadata for a database+media backup archive."""
+    filename = models.CharField(max_length=255)
+    path = models.CharField(max_length=500, blank=True, default="")
+    provider = models.CharField(max_length=20, default="local")  # local / r2 / b2 ...
+    size = models.BigIntegerField(default=0)
+    status = models.CharField(max_length=20, default="ok")       # ok / failed
+    kind = models.CharField(max_length=20, default="manual")     # manual / scheduled
+    note = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.filename} ({self.status})"
+
+
 class AuditLog(models.Model):
     """Append-only record of every staff action for accountability."""
 

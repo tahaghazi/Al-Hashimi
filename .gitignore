@@ -82,3 +82,6 @@ dmypy.json
 *.sqlite3
 # Local environment variables
 .env
+
+# Backup archives
+backups/
