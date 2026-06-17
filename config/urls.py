@@ -21,6 +21,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
 from apps.orders.api.viewsets import OrderViewSet, UserBalanceViewSet, OrderAnalyticsView, UserBalanceNoteViewSet
+from apps.orders.api.exports import ExportFinancialView
 from apps.products.api.viewsets import ProductViewSet, BrandViewSet
 from apps.users.api.viewsets import UserViewSet, StaffViewSet, AuditLogViewSet
 
@@ -38,6 +39,7 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/', include(router.urls)),
     path('api/orders-analytics/', OrderAnalyticsView.as_view(), name='today-order-analytics'),
+    path('api/export/financial/', ExportFinancialView.as_view(), name='export-financial'),
     path('api-auth/', include('rest_framework.urls', namespace='rest_framework')),
     path('api/authentication/', include('dj_rest_auth.urls')),
     path('api/authentication/registration/', include('dj_rest_auth.registration.urls')),

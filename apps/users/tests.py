@@ -91,3 +91,16 @@ class StaffAndAuditTests(TestCase):
         c = APIClient()
         c.force_authenticate(staff)
         self.assertEqual(c.get("/api/audit/").status_code, 403)
+
+    def test_financial_export_super_admin(self):
+        resp = self.client.get("/api/export/financial/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("spreadsheet", resp["Content-Type"])
+        self.assertTrue(resp.content[:2] == b"PK")  # xlsx is a zip
+
+    def test_financial_export_forbidden_for_staff(self):
+        staff = User.objects.create_user(username="s3", password="x", is_staff=True,
+                                         first_name="عادي3", role="staff")
+        c = APIClient()
+        c.force_authenticate(staff)
+        self.assertEqual(c.get("/api/export/financial/").status_code, 403)
