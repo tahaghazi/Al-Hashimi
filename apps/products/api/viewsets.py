@@ -11,7 +11,7 @@ class ProductViewSet(AuditMixin, viewsets.ModelViewSet):
     queryset = Product.objects.filter(deleted=False)
     serializer_class = ProductSerializer
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, ]
-    search_fields = ['name', 'description']
+    search_fields = ['name', 'description', 'sku']
     audit_entity = "Battery"
 
     def destroy(self, request, *args, **kwargs):
