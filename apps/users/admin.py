@@ -4,7 +4,7 @@ from django.http import FileResponse, HttpResponseRedirect
 from django.urls import path, reverse
 from django.utils.html import format_html
 
-from apps.users.backups import create_backup
+from apps.users.backups import create_backup, r2_check
 from apps.users.models import AuditLog, Backup
 
 
@@ -31,6 +31,7 @@ class BackupAdmin(admin.ModelAdmin):
         urls = super().get_urls()
         custom = [
             path("backup-now/", self.admin_site.admin_view(self.backup_now), name="backup-now"),
+            path("r2-check/", self.admin_site.admin_view(self.r2_check_view), name="backup-r2-check"),
             path("<int:pk>/download/", self.admin_site.admin_view(self.download), name="backup-download"),
         ]
         return custom + urls
@@ -38,7 +39,16 @@ class BackupAdmin(admin.ModelAdmin):
     def backup_now(self, request):
         b = create_backup("manual")
         level = messages.SUCCESS if b.status == "ok" else messages.ERROR
-        self.message_user(request, f"النسخة: {b.filename} — {b.status}", level=level)
+        msg = f"النسخة: {b.filename} — {b.status} ({b.provider})"
+        if b.note:
+            msg += f" — {b.note}"
+        self.message_user(request, msg, level=level)
+        return HttpResponseRedirect("../")
+
+    def r2_check_view(self, request):
+        ok, msg = r2_check()
+        self.message_user(request, f"Cloudflare R2: {msg}",
+                          level=messages.SUCCESS if ok else messages.WARNING)
         return HttpResponseRedirect("../")
 
     def download(self, request, pk):

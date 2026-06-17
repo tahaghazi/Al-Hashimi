@@ -20,23 +20,51 @@ def _backups_dir():
     return d
 
 
-def _maybe_upload_r2(path, filename):
-    """Upload to Cloudflare R2 if configured; returns provider name used."""
-    if not os.getenv("R2_ACCESS_KEY_ID"):
-        return "local"
+def r2_configured():
+    return bool(os.getenv("R2_ACCESS_KEY_ID") and os.getenv("R2_SECRET_ACCESS_KEY")
+                and os.getenv("R2_ENDPOINT") and os.getenv("R2_BUCKET"))
+
+
+def _r2_client():
+    import boto3  # only imported when R2 is configured
+    return boto3.client(
+        "s3",
+        endpoint_url=os.getenv("R2_ENDPOINT"),
+        aws_access_key_id=os.getenv("R2_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.getenv("R2_SECRET_ACCESS_KEY"),
+        region_name="auto",
+    )
+
+
+def r2_check():
+    """Return (ok, message) describing whether R2 is reachable."""
+    if not r2_configured():
+        return False, "R2 غير مُعد — المفاتيح مفقودة"
     try:
-        import boto3  # only needed/imported when R2 is configured
-        s3 = boto3.client(
-            "s3",
-            endpoint_url=os.getenv("R2_ENDPOINT"),
-            aws_access_key_id=os.getenv("R2_ACCESS_KEY_ID"),
-            aws_secret_access_key=os.getenv("R2_SECRET_ACCESS_KEY"),
-            region_name="auto",
-        )
-        s3.upload_file(str(path), os.getenv("R2_BUCKET"), filename)
-        return "r2"
-    except Exception:
-        return "local"
+        _r2_client().list_objects_v2(Bucket=os.getenv("R2_BUCKET"), MaxKeys=1)
+        return True, f"متصل بنجاح بـ {os.getenv('R2_BUCKET')}"
+    except Exception as e:
+        return False, str(e)[:300]
+
+
+def _maybe_upload_r2(path, filename):
+    """Upload to Cloudflare R2 if configured. Returns (provider, error|None)."""
+    if not r2_configured():
+        return "local", None
+    try:
+        s3 = _r2_client()
+        bucket = os.getenv("R2_BUCKET")
+        s3.upload_file(str(path), bucket, f"backups/{filename}")
+        # Remote retention: keep the newest RETENTION objects under backups/.
+        try:
+            objs = s3.list_objects_v2(Bucket=bucket, Prefix="backups/").get("Contents", [])
+            for o in sorted(objs, key=lambda x: x["LastModified"], reverse=True)[RETENTION:]:
+                s3.delete_object(Bucket=bucket, Key=o["Key"])
+        except Exception:
+            pass
+        return "r2", None
+    except Exception as e:
+        return "local", str(e)[:300]
 
 
 def _apply_retention():
@@ -69,10 +97,13 @@ def create_backup(kind="manual"):
                         full = os.path.join(root, f)
                         z.write(full, os.path.join("media", os.path.relpath(full, media)))
         size = os.path.getsize(path)
-        provider = _maybe_upload_r2(path, filename)
+        provider, r2_error = _maybe_upload_r2(path, filename)
+        note = ""
+        if r2_configured() and provider != "r2":
+            note = f"R2 upload failed: {r2_error}"
         backup = Backup.objects.create(
             filename=filename, path=str(path), size=size,
-            provider=provider, status="ok", kind=kind,
+            provider=provider, status="ok", kind=kind, note=note,
         )
         _apply_retention()
         return backup
