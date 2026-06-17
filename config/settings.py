@@ -218,6 +218,8 @@ REST_AUTH = {
     "JWT_AUTH_HTTPONLY": False,  # return the refresh token in the body
     # Keep the legacy access_token/refresh_token response keys for the frontend.
     "JWT_SERIALIZER": "apps.users.api.serializers.CustomJWTSerializer",
+    # /user/ returns the role so the app can gate super-admin features.
+    "USER_DETAILS_SERIALIZER": "apps.users.api.serializers.UserDetailsSerializer",
 }
 
 SITE_ID = 1

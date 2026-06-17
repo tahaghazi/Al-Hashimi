@@ -22,7 +22,7 @@ from rest_framework.routers import DefaultRouter
 
 from apps.orders.api.viewsets import OrderViewSet, UserBalanceViewSet, OrderAnalyticsView, UserBalanceNoteViewSet
 from apps.products.api.viewsets import ProductViewSet, BrandViewSet
-from apps.users.api.viewsets import UserViewSet
+from apps.users.api.viewsets import UserViewSet, StaffViewSet, AuditLogViewSet
 
 router = DefaultRouter()
 router.register("users", UserViewSet, basename="users")
@@ -31,6 +31,8 @@ router.register("brand", BrandViewSet, basename="brand")
 router.register("orders", OrderViewSet, basename="orders")
 router.register(r'user-balance', UserBalanceViewSet, basename='user-balance')
 router.register(r'user-balance-notes', UserBalanceNoteViewSet, basename='user-balance-notes')
+router.register("staff", StaffViewSet, basename="staff")
+router.register("audit", AuditLogViewSet, basename="audit")
 
 urlpatterns = [
     path('admin/', admin.site.urls),

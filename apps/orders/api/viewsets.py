@@ -18,6 +18,8 @@ from apps.orders.api.serializers import OrderSerializer, UserBalanceSerializer, 
     UserBalanceNoteSerializer
 from apps.orders.models import Order, UserBalance, OrderItem, BalanceNote, LedgerEntry
 from apps.products.models import Product
+from apps.users.audit import AuditMixin, log_action
+from apps.users.models import AuditLog
 
 
 class OrderFilter(django_filters.FilterSet):
@@ -30,7 +32,8 @@ class OrderFilter(django_filters.FilterSet):
         fields = ["user", "order_items__product", "start", "end"]
 
 
-class OrderViewSet(viewsets.ModelViewSet):
+class OrderViewSet(AuditMixin, viewsets.ModelViewSet):
+    audit_entity = "Order"
     # select_related/prefetch_related collapse what used to be an N+1 storm:
     # the serializer touches user, balance, items, products and brands per order.
     queryset = (
@@ -84,6 +87,9 @@ class OrderViewSet(viewsets.ModelViewSet):
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
+        log_action(request, AuditLog.Action.UPDATE, entity="Order",
+                   object_id=serializer.data.get("id"), object_repr=f"Order #{serializer.data.get('id')}",
+                   after={"amount_to_pay": str(serializer.data.get("amount_to_pay"))})
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
@@ -126,6 +132,10 @@ class UserBalanceViewSet(viewsets.ModelViewSet):
                     )
                     user_balance.refresh_from_db()
                     BalanceNote.objects.create(user=user_balance.user, amount=amount, note=note or "", source=source)
+                log_action(request, AuditLog.Action.PAYMENT, entity="Payment",
+                           object_id=user_balance.user_id,
+                           object_repr=f"{amount} ({source or '-'}) -> {user_balance.user}",
+                           after={"amount": str(amount), "source": source, "balance": balance_type})
                 return Response({
                     'status': 'success',
                     'message': f'{amount} deposited to {balance_type} successfully',
