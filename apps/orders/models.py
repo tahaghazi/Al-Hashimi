@@ -73,6 +73,44 @@ class Order(models.Model):
         return self.total + self.supplement - self.discount
 
 
+class OrderRevision(models.Model):
+    """A snapshot of an order's previous state, kept on every edit.
+
+    Lets invoices be edited indefinitely without ever losing a prior version,
+    with full history and rollback.
+    """
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="revisions")
+    snapshot = models.JSONField()
+    editor = models.ForeignKey("users.CustomUser", null=True, blank=True, on_delete=models.SET_NULL)
+    editor_username = models.CharField(max_length=150, blank=True, default="")
+    reason = models.CharField(max_length=200, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Revision of Order #{self.order_id} @ {self.created_at:%Y-%m-%d %H:%M}"
+
+
+def order_snapshot(order):
+    """JSON-safe snapshot of an order's current state for a revision."""
+    return {
+        "supplement": str(order.supplement),
+        "discount": str(order.discount),
+        "total": str(order.total),
+        "amount_to_pay": str(order.amount_to_pay()),
+        "items": [{
+            "product": it.product_id,
+            "product_name": (it.extra_data or {}).get("product_name") or str(it.product),
+            "quantity": it.quantity,
+            "price": str(it.fixed_price),
+            "total": str(it.total),
+        } for it in order.order_items.all()],
+        "created_at": order.created_at.isoformat() if order.created_at else None,
+    }
+
+
 class BalanceNote(models.Model):
     class PaymentSource(models.TextChoices):
         INSTAPAY = "instapay", "انستا باي"

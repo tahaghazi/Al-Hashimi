@@ -185,6 +185,34 @@ class OrderEditTests(OrdersBaseTestCase):
         self.assertEqual(self._balance().orders_total, Decimal("500.00"))
 
 
+class OrderRevisionTests(OrdersBaseTestCase):
+    def _create(self, qty=3, supp="0"):
+        return self.client.post("/api/orders/", self._order_payload(quantity=qty, supplement=supp), format="json")
+
+    def test_edit_keeps_id_and_records_revision(self):
+        oid = self._create(qty=3).json()["id"]
+        edit = {"user": self.customer.id, "supplement": "0",
+                "order_items": [{"product": self.product.id, "quantity": 2}]}
+        r = self.client.put(f"/api/orders/{oid}/", edit, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(r.json()["id"], oid)  # id stays stable
+        revs = self.client.get(f"/api/orders/{oid}/revisions/").json()
+        self.assertEqual(len(revs), 1)
+        self.assertEqual(revs[0]["snapshot"]["items"][0]["quantity"], 3)  # old value preserved
+
+    def test_rollback_restores_previous_state(self):
+        oid = self._create(qty=3).json()["id"]  # owes 300
+        self.client.put(f"/api/orders/{oid}/", {
+            "user": self.customer.id, "supplement": "0",
+            "order_items": [{"product": self.product.id, "quantity": 5}],
+        }, format="json")  # owes 500
+        self.assertEqual(self._balance().orders_total, Decimal("500.00"))
+        rev_id = self.client.get(f"/api/orders/{oid}/revisions/").json()[0]["id"]
+        rb = self.client.post(f"/api/orders/{oid}/rollback/{rev_id}/", {}, format="json")
+        self.assertEqual(rb.status_code, 200, rb.content)
+        self.assertEqual(self._balance().orders_total, Decimal("300.00"))  # back to qty 3
+
+
 class OrderApiRobustnessTests(OrdersBaseTestCase):
     def test_search_query_does_not_crash(self):
         resp = self.client.get("/api/orders/?search=anything")

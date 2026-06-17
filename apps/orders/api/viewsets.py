@@ -48,49 +48,103 @@ class OrderViewSet(AuditMixin, viewsets.ModelViewSet):
     filterset_class = OrderFilter
 
     def update(self, request, *args, **kwargs):
-        """Replace an order: reverse the old one, then create the new one.
-
-        The reversal (restock + un-charge the balance) happens BEFORE creating
-        the replacement, and the whole thing is one transaction — so a failure
-        (e.g. not enough stock for the new quantities) rolls everything back and
-        leaves the original order intact.
-        """
+        """Edit an order IN PLACE (id stays stable), keeping a full revision
+        history. Editing is allowed indefinitely; every edit snapshots the
+        previous state into an OrderRevision so nothing is ever lost."""
         instance = self.get_object()
-
-        # Editing only makes sense while the recorded prices still match the
-        # current product prices; otherwise the reversal math would drift.
-        if not all(item.fixed_price == item.product.price for item in instance.order_items.all()):
-            return Response(
-                {"error": "لا يمكن تعديل هذا الطلب لأن أسعار المنتجات تغيرت"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
+        serializer = self.get_serializer(instance, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
         try:
-            with transaction.atomic():
-                # 1) Reverse the existing order's effects.
-                instance.user.userbalance.deposit(
-                    -instance.amount_to_pay(), "orders_total",
-                    kind=LedgerEntry.Kind.ORDER_REVERSAL, note=f"تعديل الطلب #{instance.id}",
-                )
-                for item in instance.order_items.all():
-                    Product.objects.filter(pk=item.product_id).update(
-                        stock=F("stock") + item.quantity
-                    )
-                instance.delete()
-
-                # 2) Create the replacement (stock/balance applied by the serializer).
-                serializer = self.get_serializer(data=request.data)
-                serializer.is_valid(raise_exception=True)
-                serializer.save()
+            self._apply_edit(request, instance, serializer.validated_data,
+                             reason=request.data.get("reason", ""))
         except serializers.ValidationError:
             raise
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-        log_action(request, AuditLog.Action.UPDATE, entity="Order",
-                   object_id=serializer.data.get("id"), object_repr=f"Order #{serializer.data.get('id')}",
-                   after={"amount_to_pay": str(serializer.data.get("amount_to_pay"))})
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        instance.refresh_from_db()
+        data = self.get_serializer(instance).data
+        log_action(request, AuditLog.Action.UPDATE, entity="Order", object_id=instance.id,
+                   object_repr=f"Order #{instance.id}",
+                   after={"amount_to_pay": str(data.get("amount_to_pay"))})
+        return Response(data, status=status.HTTP_200_OK)
+
+    def _apply_edit(self, request, instance, validated_data, reason=""):
+        """Snapshot a revision, reverse the order's current effects, then apply
+        the new items/scrap/discount — all atomic."""
+        from apps.orders.models import OrderRevision, order_snapshot
+        actor = request.user if getattr(request.user, "is_authenticated", False) else None
+        with transaction.atomic():
+            OrderRevision.objects.create(
+                order=instance, snapshot=order_snapshot(instance), editor=actor,
+                editor_username=getattr(actor, "username", "") or "", reason=reason[:200],
+            )
+            # reverse old effects
+            instance.user.userbalance.deposit(
+                -instance.amount_to_pay(), "orders_total",
+                kind=LedgerEntry.Kind.ORDER_REVERSAL, note=f"تعديل الطلب #{instance.id}",
+            )
+            for item in instance.order_items.all():
+                Product.objects.filter(pk=item.product_id).update(stock=F("stock") + item.quantity)
+            instance.order_items.all().delete()
+
+            # apply new items
+            items_data = validated_data.get("order_items", [])
+            if "supplement" in validated_data:
+                instance.supplement = validated_data["supplement"]
+            if "discount" in validated_data:
+                instance.discount = validated_data["discount"]
+            new_items = []
+            for item_data in items_data:
+                product = item_data["product"]
+                qty = item_data["quantity"]
+                locked = Product.objects.select_for_update().get(pk=product.pk)
+                if qty > locked.stock:
+                    raise serializers.ValidationError(
+                        {"order_items": f"المخزون غير كافٍ للمنتج {locked}. المتاح: {locked.stock}"})
+                locked.stock -= qty
+                locked.save(update_fields=["stock"])
+                new_items.append(OrderItem.objects.create(**item_data))
+            instance.order_items.set(new_items)
+            instance.recalculate_total()
+            if instance.amount_to_pay() <= 0:
+                raise serializers.ValidationError(
+                    {"discount": "المبلغ النهائي للفاتورة يجب أن يكون أكبر من صفر"})
+            instance.user.userbalance.deposit(
+                instance.amount_to_pay(), "orders_total", kind=LedgerEntry.Kind.ORDER, order=instance)
+            instance.save()
+
+    @action(detail=True, methods=["get"])
+    def revisions(self, request, pk=None):
+        from apps.orders.api.serializers import OrderRevisionSerializer
+        order = self.get_object()
+        return Response(OrderRevisionSerializer(order.revisions.all(), many=True).data)
+
+    @action(detail=True, methods=["post"], url_path="rollback/(?P<rev_id>[0-9]+)")
+    def rollback(self, request, pk=None, rev_id=None):
+        from apps.orders.models import OrderRevision
+        order = self.get_object()
+        rev = get_object_or_404(OrderRevision, pk=rev_id, order=order)
+        snap = rev.snapshot
+        # Re-apply the snapshot's items/scrap/discount as a fresh edit.
+        data = {
+            "user": order.user_id,
+            "supplement": snap.get("supplement", 0),
+            "discount": snap.get("discount", 0),
+            "order_items": [{"product": it["product"], "quantity": it["quantity"]}
+                            for it in snap.get("items", [])],
+        }
+        serializer = self.get_serializer(order, data=data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        try:
+            self._apply_edit(request, order, serializer.validated_data,
+                             reason=f"استرجاع نسخة #{rev_id}")
+        except serializers.ValidationError:
+            raise
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        order.refresh_from_db()
+        return Response(self.get_serializer(order).data, status=status.HTTP_200_OK)
 
 
 

@@ -3,10 +3,16 @@ import decimal
 from django.db import transaction
 from rest_framework import serializers
 
-from apps.orders.models import Order, OrderItem, UserBalance, BalanceNote, LedgerEntry
+from apps.orders.models import Order, OrderItem, UserBalance, BalanceNote, LedgerEntry, OrderRevision
 from apps.products.api.serializers import ProductSerializer
 from apps.products.models import Product
 from apps.users.api.serializers import UserSerializer
+
+
+class OrderRevisionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OrderRevision
+        fields = ("id", "snapshot", "editor_username", "reason", "created_at")
 
 
 class OrderItemSerializer(serializers.ModelSerializer):
@@ -34,7 +40,9 @@ class OrderSerializer(serializers.ModelSerializer):
         data = super().to_representation(instance)
         data["amount_to_pay"] = instance.amount_to_pay()
         data["user"] = UserSerializer(instance.user).data
-        data["allow_edit"] = all(item.fixed_price == item.product.price for item in instance.order_items.all())
+        # Invoices are now editable indefinitely (revisions preserve history).
+        data["allow_edit"] = True
+        data["revisions_count"] = instance.revisions.count()
         return data
 
 
