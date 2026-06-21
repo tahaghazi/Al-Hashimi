@@ -220,6 +220,8 @@ REST_AUTH = {
     "JWT_SERIALIZER": "apps.users.api.serializers.CustomJWTSerializer",
     # /user/ returns the role so the app can gate super-admin features.
     "USER_DETAILS_SERIALIZER": "apps.users.api.serializers.UserDetailsSerializer",
+    # Require the current password when a user changes their own password.
+    "OLD_PASSWORD_FIELD_ENABLED": True,
 }
 
 SITE_ID = 1
