@@ -94,6 +94,8 @@ class OrderViewSet(AuditMixin, viewsets.ModelViewSet):
                 instance.supplement = validated_data["supplement"]
             if "discount" in validated_data:
                 instance.discount = validated_data["discount"]
+            if "discount_note" in validated_data:
+                instance.discount_note = validated_data["discount_note"]
             new_items = []
             for item_data in items_data:
                 product = item_data["product"]
@@ -131,6 +133,7 @@ class OrderViewSet(AuditMixin, viewsets.ModelViewSet):
             "user": order.user_id,
             "supplement": snap.get("supplement", 0),
             "discount": snap.get("discount", 0),
+            "discount_note": snap.get("discount_note", ""),
             "order_items": [{"product": it["product"], "quantity": it["quantity"]}
                             for it in snap.get("items", [])],
         }

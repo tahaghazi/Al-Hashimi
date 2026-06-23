@@ -46,6 +46,7 @@ class Order(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     supplement = models.DecimalField(max_digits=20, decimal_places=2, default=0)
     discount = models.DecimalField(max_digits=20, decimal_places=2, default=0)
+    discount_note = models.CharField(max_length=255, blank=True, default="")
     # Client-generated idempotency key. An order created offline carries this
     # UUID so that replaying the request when connectivity returns finds the
     # existing order instead of charging the customer (and stock) twice.
@@ -98,6 +99,7 @@ def order_snapshot(order):
     return {
         "supplement": str(order.supplement),
         "discount": str(order.discount),
+        "discount_note": order.discount_note,
         "total": str(order.total),
         "amount_to_pay": str(order.amount_to_pay()),
         "items": [{
