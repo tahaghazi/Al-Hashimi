@@ -1,6 +1,7 @@
 import decimal
 
 from django.db import transaction
+from django.db.models import Sum, F, DecimalField
 from rest_framework import serializers
 
 from apps.orders.models import Order, OrderItem, UserBalance, BalanceNote, LedgerEntry, OrderRevision
@@ -43,6 +44,19 @@ class OrderSerializer(serializers.ModelSerializer):
         # Invoices are now editable indefinitely (revisions preserve history).
         data["allow_edit"] = True
         data["revisions_count"] = instance.revisions.count()
+        # On the single-invoice (print) view, include the customer's running
+        # totals: the sum of all their OTHER invoices, and the grand total that
+        # adds this invoice on top. Computed only on retrieve to keep list views
+        # cheap (one aggregate query).
+        view = self.context.get("view")
+        if view is not None and getattr(view, "action", None) == "retrieve":
+            others = (
+                Order.objects.filter(user=instance.user).exclude(pk=instance.pk)
+                .aggregate(s=Sum(F("total") + F("supplement") - F("discount"),
+                                 output_field=DecimalField()))["s"] or decimal.Decimal("0")
+            )
+            data["previous_invoices_total"] = others
+            data["customer_invoices_total"] = others + instance.amount_to_pay()
         return data
 
 

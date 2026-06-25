@@ -109,9 +109,9 @@ class OrderViewSet(AuditMixin, viewsets.ModelViewSet):
                 new_items.append(OrderItem.objects.create(**item_data))
             instance.order_items.set(new_items)
             instance.recalculate_total()
-            if instance.amount_to_pay() <= 0:
-                raise serializers.ValidationError(
-                    {"discount": "المبلغ النهائي للفاتورة يجب أن يكون أكبر من صفر"})
+            # Edits may set the invoice to any value (including a net credit):
+            # the difference flows to the customer's balance, which is allowed to
+            # go negative (the customer ends up in credit). No > 0 guard here.
             instance.user.userbalance.deposit(
                 instance.amount_to_pay(), "orders_total", kind=LedgerEntry.Kind.ORDER, order=instance)
             instance.save()

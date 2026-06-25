@@ -184,6 +184,32 @@ class OrderEditTests(OrdersBaseTestCase):
         self.assertEqual(self.product.stock, 5)  # back to 10, then -5
         self.assertEqual(self._balance().orders_total, Decimal("500.00"))
 
+    def test_edit_paid_invoice_down_makes_balance_negative(self):
+        # Bill 300, customer pays the full 300 -> balance 0.
+        create = self.client.post(
+            "/api/orders/", self._order_payload(quantity=3, supplement="0"), format="json"
+        )
+        order_id = create.json()["id"]
+        balance = self._balance()
+        self.client.post(
+            f"/api/user-balance/{balance.id}/deposit/",
+            {"amount": "300", "balance_type": "paid_amount", "note": "دفع كامل"},
+            format="json",
+        )
+        self.assertEqual(self._balance().amount_to_pay(), Decimal("0.00"))
+
+        # Edit the (paid) invoice down to a single unit = 100. Allowed even
+        # though it's already paid; the customer ends up 200 in credit.
+        resp = self.client.put(
+            f"/api/orders/{order_id}/",
+            {"user": self.customer.id, "supplement": "0",
+             "order_items": [{"product": self.product.id, "quantity": 1}]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(self._balance().orders_total, Decimal("100.00"))
+        self.assertEqual(self._balance().amount_to_pay(), Decimal("-200.00"))
+
 
 class OrderRevisionTests(OrdersBaseTestCase):
     def _create(self, qty=3, supp="0"):
