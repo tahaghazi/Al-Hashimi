@@ -1,7 +1,6 @@
 import decimal
 
 from django.db import transaction
-from django.db.models import Sum, F, DecimalField
 from rest_framework import serializers
 
 from apps.orders.models import Order, OrderItem, UserBalance, BalanceNote, LedgerEntry, OrderRevision
@@ -44,19 +43,23 @@ class OrderSerializer(serializers.ModelSerializer):
         # Invoices are now editable indefinitely (revisions preserve history).
         data["allow_edit"] = True
         data["revisions_count"] = instance.revisions.count()
-        # On the single-invoice (print) view, include the customer's running
-        # totals: the sum of all their OTHER invoices, and the grand total that
-        # adds this invoice on top. Computed only on retrieve to keep list views
-        # cheap (one aggregate query).
+        # On the single-invoice (print) view, include the customer's account
+        # figures straight from their UserBalance, so the printed invoice matches
+        # the customer page exactly. Computed only on retrieve to keep lists cheap.
         view = self.context.get("view")
         if view is not None and getattr(view, "action", None) == "retrieve":
-            others = (
-                Order.objects.filter(user=instance.user).exclude(pk=instance.pk)
-                .aggregate(s=Sum(F("total") + F("supplement") - F("discount"),
-                                 output_field=DecimalField()))["s"] or decimal.Decimal("0")
-            )
-            data["previous_invoices_total"] = others
-            data["customer_invoices_total"] = others + instance.amount_to_pay()
+            bal = UserBalance.objects.filter(user=instance.user).first()
+            orders_total = bal.orders_total if bal else decimal.Decimal("0")
+            paid = bal.paid_amount if bal else decimal.Decimal("0")
+            current = instance.amount_to_pay()
+            # مجموع الفواتير (customer page) minus this invoice.
+            data["previous_invoices_total"] = orders_total - current
+            # مجموع الفواتير (all invoices).
+            data["customer_invoices_total"] = orders_total
+            # المدفوع (customer page).
+            data["customer_paid_total"] = paid
+            # المتبقي المستحق (customer page) = orders_total - paid.
+            data["customer_balance_due"] = orders_total - paid
         return data
 
 
