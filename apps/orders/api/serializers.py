@@ -52,14 +52,10 @@ class OrderSerializer(serializers.ModelSerializer):
             orders_total = bal.orders_total if bal else decimal.Decimal("0")
             paid = bal.paid_amount if bal else decimal.Decimal("0")
             current = instance.amount_to_pay()
-            # مجموع الفواتير (customer page) minus this invoice.
-            data["previous_invoices_total"] = orders_total - current
-            # مجموع الفواتير (all invoices).
-            data["customer_invoices_total"] = orders_total
-            # المدفوع (customer page).
-            data["customer_paid_total"] = paid
-            # المتبقي المستحق (customer page) = orders_total - paid.
+            # المتبقي المستحق (customer page) = orders_total - paid (incl. this invoice).
             data["customer_balance_due"] = orders_total - paid
+            # المستحق القديم = what was owed BEFORE this invoice = total due - this invoice.
+            data["previous_balance_due"] = (orders_total - paid) - current
         return data
 
 
