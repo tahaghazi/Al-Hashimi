@@ -92,10 +92,12 @@ class OrderSerializer(serializers.ModelSerializer):
 
             order.order_items.set(order_items)
             order.recalculate_total()
-            # The final amount (goods + scrap - discount) must stay above zero.
-            if order.amount_to_pay() <= 0:
+            # The bill must be non-empty, but the final amount may be negative
+            # (a credit / خردة adjustment) — that just moves the customer's
+            # balance into credit. Only an exactly-zero bill is rejected.
+            if order.amount_to_pay() == 0:
                 raise serializers.ValidationError(
-                    {"discount": "المبلغ النهائي للفاتورة يجب أن يكون أكبر من صفر"}
+                    {"discount": "الفاتورة فارغة — أضف بطارية أو قيمة خردة"}
                 )
             # Add what the customer now owes to their balance, exactly once,
             # inside this transaction, and record it in the ledger.

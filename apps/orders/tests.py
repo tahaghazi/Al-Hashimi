@@ -64,6 +64,16 @@ class OrderCreationTests(OrdersBaseTestCase):
         self.product.refresh_from_db()
         self.assertEqual(self.product.stock, 10)  # untouched
 
+    def test_negative_scrap_creates_credit(self):
+        # A negative خردة is a credit adjustment: balance goes negative.
+        resp = self.client.post(
+            "/api/orders/",
+            {"user": self.customer.id, "supplement": "-5", "order_items": []},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(self._balance().amount_to_pay(), Decimal("-5.00"))
+
     def test_creation_decrements_stock_exactly_once(self):
         resp = self.client.post("/api/orders/", self._order_payload(quantity=3), format="json")
         self.assertEqual(resp.status_code, 201, resp.content)
