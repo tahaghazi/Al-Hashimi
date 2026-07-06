@@ -51,6 +51,19 @@ class OrdersBaseTestCase(TestCase):
 
 
 class OrderCreationTests(OrdersBaseTestCase):
+    def test_scrap_only_bill_no_batteries(self):
+        # A bill with only خردة (supplement) and no order items is allowed.
+        resp = self.client.post(
+            "/api/orders/",
+            {"user": self.customer.id, "supplement": "80", "order_items": []},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(self._balance().orders_total, Decimal("80.00"))
+        self.assertEqual(self._balance().amount_to_pay(), Decimal("80.00"))
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 10)  # untouched
+
     def test_creation_decrements_stock_exactly_once(self):
         resp = self.client.post("/api/orders/", self._order_payload(quantity=3), format="json")
         self.assertEqual(resp.status_code, 201, resp.content)
