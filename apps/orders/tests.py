@@ -64,6 +64,26 @@ class OrderCreationTests(OrdersBaseTestCase):
         self.product.refresh_from_db()
         self.assertEqual(self.product.stock, 10)  # untouched
 
+    def test_invoice_freezes_amount_due_at_issue(self):
+        # Invoice #1 = 300 (first bill), frozen due = 300.
+        r1 = self.client.post("/api/orders/", self._order_payload(quantity=3, supplement="0"), format="json")
+        oid1 = r1.json()["id"]
+        # Pay 100, then issue invoice #2 = 200.
+        bal = self._balance()
+        self.client.post(f"/api/user-balance/{bal.id}/deposit/",
+                         {"amount": "100", "balance_type": "paid_amount"}, format="json")
+        r2 = self.client.post("/api/orders/", self._order_payload(quantity=2, supplement="0"), format="json")
+        oid2 = r2.json()["id"]
+
+        # Invoice #1 keeps the amount due it had when issued (300), NOT the live 400.
+        d1 = self.client.get(f"/api/orders/{oid1}/").json()
+        self.assertEqual(Decimal(str(d1["customer_balance_due"])), Decimal("300.00"))
+        self.assertEqual(Decimal(str(d1["previous_balance_due"])), Decimal("0.00"))
+        # Invoice #2 was issued when 200 was already owed -> due 400.
+        d2 = self.client.get(f"/api/orders/{oid2}/").json()
+        self.assertEqual(Decimal(str(d2["previous_balance_due"])), Decimal("200.00"))
+        self.assertEqual(Decimal(str(d2["customer_balance_due"])), Decimal("400.00"))
+
     def test_negative_scrap_creates_credit(self):
         # A negative خردة is a credit adjustment: balance goes negative.
         resp = self.client.post(

@@ -47,6 +47,10 @@ class Order(models.Model):
     supplement = models.DecimalField(max_digits=20, decimal_places=2, default=0)
     discount = models.DecimalField(max_digits=20, decimal_places=2, default=0)
     discount_note = models.CharField(max_length=255, blank=True, default="")
+    # Snapshot of the customer's outstanding balance BEFORE this invoice, frozen
+    # at create/edit time. Lets a printed invoice keep the "amount due" it had
+    # when issued, unaffected by later payments or new invoices.
+    prev_balance_due = models.DecimalField(max_digits=20, decimal_places=2, default=0)
     # Client-generated idempotency key. An order created offline carries this
     # UUID so that replaying the request when connectivity returns finds the
     # existing order instead of charging the customer (and stock) twice.

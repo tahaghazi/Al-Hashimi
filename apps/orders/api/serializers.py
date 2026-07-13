@@ -48,14 +48,10 @@ class OrderSerializer(serializers.ModelSerializer):
         # the customer page exactly. Computed only on retrieve to keep lists cheap.
         view = self.context.get("view")
         if view is not None and getattr(view, "action", None) == "retrieve":
-            bal = UserBalance.objects.filter(user=instance.user).first()
-            orders_total = bal.orders_total if bal else decimal.Decimal("0")
-            paid = bal.paid_amount if bal else decimal.Decimal("0")
-            current = instance.amount_to_pay()
-            # المتبقي المستحق (customer page) = orders_total - paid (incl. this invoice).
-            data["customer_balance_due"] = orders_total - paid
-            # المستحق القديم = what was owed BEFORE this invoice = total due - this invoice.
-            data["previous_balance_due"] = (orders_total - paid) - current
+            # Frozen at issue/edit time — a reprint keeps the amounts it had then,
+            # unaffected by later payments or new invoices.
+            data["previous_balance_due"] = instance.prev_balance_due          # الفواتير السابقة
+            data["customer_balance_due"] = instance.prev_balance_due + instance.amount_to_pay()  # المتبقي المستحق
         return data
 
 
@@ -99,9 +95,15 @@ class OrderSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {"discount": "الفاتورة فارغة — أضف بطارية أو قيمة خردة"}
                 )
+            # Freeze the customer's outstanding balance BEFORE this invoice, so
+            # a reprint keeps the amount due it had when issued.
+            ub = order.user.userbalance
+            ub.refresh_from_db()
+            order.prev_balance_due = ub.amount_to_pay()
+            order.save(update_fields=["prev_balance_due"])
             # Add what the customer now owes to their balance, exactly once,
             # inside this transaction, and record it in the ledger.
-            order.user.userbalance.deposit(
+            ub.deposit(
                 order.amount_to_pay(), "orders_total",
                 kind=LedgerEntry.Kind.ORDER, order=order,
             )

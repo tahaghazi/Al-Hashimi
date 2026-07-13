@@ -84,6 +84,11 @@ class OrderViewSet(AuditMixin, viewsets.ModelViewSet):
                 -instance.amount_to_pay(), "orders_total",
                 kind=LedgerEntry.Kind.ORDER_REVERSAL, note=f"تعديل الطلب #{instance.id}",
             )
+            # With this invoice removed, the balance now reflects everything else
+            # — freeze that as the "previous due" for this (re-issued) invoice.
+            ub = instance.user.userbalance
+            ub.refresh_from_db()
+            instance.prev_balance_due = ub.amount_to_pay()
             for item in instance.order_items.all():
                 Product.objects.filter(pk=item.product_id).update(stock=F("stock") + item.quantity)
             instance.order_items.all().delete()
