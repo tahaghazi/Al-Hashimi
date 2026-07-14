@@ -80,3 +80,8 @@ dmypy.json
 .pyre/
 
 *.sqlite3
+# Local environment variables
+.env
+
+# Backup archives
+backups/

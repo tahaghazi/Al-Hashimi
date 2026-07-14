@@ -1,3 +1,414 @@
-from django.test import TestCase
+"""
+Tests for the orders app: stock and balance correctness.
 
-# Create your tests here.
+These tests pin down the intended behavior of the core money/stock flows:
+  - withdrawing batteries (creating an Order) decrements stock exactly once,
+  - the customer's owed balance reflects order total + scrap (supplement),
+  - payments reduce what is owed,
+  - editing an order cleanly restocks and re-balances,
+  - and a handful of small bugs (crashing __str__, broken search) stay fixed.
+
+Run with:  .venv/Scripts/python.exe manage.py test apps.orders
+"""
+import uuid
+from decimal import Decimal
+
+from django.contrib.auth import get_user_model
+from django.test import TestCase
+from rest_framework.test import APIClient
+
+from apps.orders.models import Order, OrderItem, BalanceNote, LedgerEntry
+from apps.products.models import Brand, Product
+
+User = get_user_model()
+
+
+class OrdersBaseTestCase(TestCase):
+    def setUp(self):
+        # A staff member who operates the app.
+        self.staff = User.objects.create_user(
+            username="staff", password="pw", is_staff=True
+        )
+        # A customer (one of the stores is modeled as a customer too).
+        self.customer = User.objects.create(first_name="متجر رقم واحد")
+        self.brand = Brand.objects.create(name="Bosch")
+        self.product = Product.objects.create(
+            name="battery-100", brand=self.brand, price=Decimal("100.00"), stock=10
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(self.staff)
+
+    def _order_payload(self, quantity=3, supplement="50"):
+        return {
+            "user": self.customer.id,
+            "supplement": supplement,
+            "order_items": [{"product": self.product.id, "quantity": quantity}],
+        }
+
+    def _balance(self):
+        self.customer.userbalance.refresh_from_db()
+        return self.customer.userbalance
+
+
+class OrderCreationTests(OrdersBaseTestCase):
+    def test_scrap_only_bill_no_batteries(self):
+        # A bill with only خردة (supplement) and no order items is allowed.
+        resp = self.client.post(
+            "/api/orders/",
+            {"user": self.customer.id, "supplement": "80", "order_items": []},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(self._balance().orders_total, Decimal("80.00"))
+        self.assertEqual(self._balance().amount_to_pay(), Decimal("80.00"))
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 10)  # untouched
+
+    def test_invoice_freezes_amount_due_at_issue(self):
+        # Invoice #1 = 300 (first bill), frozen due = 300.
+        r1 = self.client.post("/api/orders/", self._order_payload(quantity=3, supplement="0"), format="json")
+        oid1 = r1.json()["id"]
+        # Pay 100, then issue invoice #2 = 200.
+        bal = self._balance()
+        self.client.post(f"/api/user-balance/{bal.id}/deposit/",
+                         {"amount": "100", "balance_type": "paid_amount"}, format="json")
+        r2 = self.client.post("/api/orders/", self._order_payload(quantity=2, supplement="0"), format="json")
+        oid2 = r2.json()["id"]
+
+        # Invoice #1 keeps the amount due it had when issued (300), NOT the live 400.
+        d1 = self.client.get(f"/api/orders/{oid1}/").json()
+        self.assertEqual(Decimal(str(d1["customer_balance_due"])), Decimal("300.00"))
+        self.assertEqual(Decimal(str(d1["previous_balance_due"])), Decimal("0.00"))
+        # Invoice #2 was issued when 200 was already owed -> due 400.
+        d2 = self.client.get(f"/api/orders/{oid2}/").json()
+        self.assertEqual(Decimal(str(d2["previous_balance_due"])), Decimal("200.00"))
+        self.assertEqual(Decimal(str(d2["customer_balance_due"])), Decimal("400.00"))
+
+    def test_negative_scrap_creates_credit(self):
+        # A negative خردة is a credit adjustment: balance goes negative.
+        resp = self.client.post(
+            "/api/orders/",
+            {"user": self.customer.id, "supplement": "-5", "order_items": []},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(self._balance().amount_to_pay(), Decimal("-5.00"))
+
+    def test_creation_decrements_stock_exactly_once(self):
+        resp = self.client.post("/api/orders/", self._order_payload(quantity=3), format="json")
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 7)  # 10 - 3, not 10 - 6
+
+    def test_creation_sets_owed_balance_to_total_plus_scrap(self):
+        resp = self.client.post(
+            "/api/orders/", self._order_payload(quantity=3, supplement="50"), format="json"
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+        balance = self._balance()
+        # 3 * 100 = 300 goods + 50 scrap = 350 owed
+        self.assertEqual(balance.orders_total, Decimal("350.00"))
+        self.assertEqual(balance.amount_to_pay(), Decimal("350.00"))
+
+    def test_discount_reduces_amount_to_pay(self):
+        payload = self._order_payload(quantity=3, supplement="50")
+        payload["discount"] = "100"
+        resp = self.client.post("/api/orders/", payload, format="json")
+        self.assertEqual(resp.status_code, 201, resp.content)
+        # 300 goods + 50 scrap - 100 discount = 250
+        self.assertEqual(self._balance().orders_total, Decimal("250.00"))
+        self.assertEqual(self._balance().amount_to_pay(), Decimal("250.00"))
+
+    def test_discount_cannot_make_bill_zero_or_negative(self):
+        payload = self._order_payload(quantity=3, supplement="50")
+        payload["discount"] = "350"  # equals goods + scrap -> final 0
+        resp = self.client.post("/api/orders/", payload, format="json")
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(Order.objects.count(), 0)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 10)  # rolled back
+
+    def test_insufficient_stock_returns_400_and_changes_nothing(self):
+        resp = self.client.post(
+            "/api/orders/", self._order_payload(quantity=999), format="json"
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 10)  # untouched
+        self.assertEqual(Order.objects.count(), 0)
+        self.assertEqual(self._balance().orders_total, Decimal("0"))
+
+
+class OrderItemModelTests(OrdersBaseTestCase):
+    def test_resaving_item_does_not_re_decrement_stock(self):
+        self.client.post("/api/orders/", self._order_payload(quantity=3), format="json")
+        self.product.refresh_from_db()
+        stock_after_create = self.product.stock
+
+        item = OrderItem.objects.first()
+        item.save()  # a second save must NOT touch stock again
+
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, stock_after_create)
+
+    def test_item_total_and_fixed_price_are_computed(self):
+        self.client.post("/api/orders/", self._order_payload(quantity=4), format="json")
+        item = OrderItem.objects.first()
+        self.assertEqual(item.total, Decimal("400.00"))
+        self.assertEqual(item.fixed_price, Decimal("100.00"))
+
+
+class PaymentTests(OrdersBaseTestCase):
+    def test_payment_reduces_amount_owed_and_records_note(self):
+        self.client.post(
+            "/api/orders/", self._order_payload(quantity=3, supplement="50"), format="json"
+        )
+        balance = self._balance()  # owes 350
+
+        resp = self.client.post(
+            f"/api/user-balance/{balance.id}/deposit/",
+            {"amount": "100", "balance_type": "paid_amount", "note": "دفعة أولى"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+        balance = self._balance()
+        self.assertEqual(balance.paid_amount, Decimal("100.00"))
+        self.assertEqual(balance.amount_to_pay(), Decimal("250.00"))
+        self.assertEqual(BalanceNote.objects.filter(user=self.customer).count(), 1)
+
+    def test_payment_records_source(self):
+        self.client.post(
+            "/api/orders/", self._order_payload(quantity=3, supplement="50"), format="json"
+        )
+        balance = self._balance()
+        resp = self.client.post(
+            f"/api/user-balance/{balance.id}/deposit/",
+            {"amount": "100", "balance_type": "paid_amount", "source": "instapay"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        note = BalanceNote.objects.filter(user=self.customer).latest("timestamp")
+        self.assertEqual(note.source, "instapay")
+
+    def test_balance_note_str_does_not_crash(self):
+        note = BalanceNote.objects.create(
+            user=self.customer, note="ملاحظة", amount=Decimal("100.00")
+        )
+        # __str__ used to reference a non-existent attribute and raise.
+        self.assertIn("100", str(note))
+
+
+class OrderEditTests(OrdersBaseTestCase):
+    def test_edit_restocks_and_rebalances(self):
+        create = self.client.post(
+            "/api/orders/", self._order_payload(quantity=3, supplement="0"), format="json"
+        )
+        order_id = create.json()["id"]
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 7)
+        self.assertEqual(self._balance().orders_total, Decimal("300.00"))
+
+        # Change the same order to 5 units instead of 3.
+        edit_payload = {
+            "user": self.customer.id,
+            "supplement": "0",
+            "order_items": [{"product": self.product.id, "quantity": 5}],
+        }
+        resp = self.client.put(
+            f"/api/orders/{order_id}/", edit_payload, format="json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 5)  # back to 10, then -5
+        self.assertEqual(self._balance().orders_total, Decimal("500.00"))
+
+    def test_edit_paid_invoice_down_makes_balance_negative(self):
+        # Bill 300, customer pays the full 300 -> balance 0.
+        create = self.client.post(
+            "/api/orders/", self._order_payload(quantity=3, supplement="0"), format="json"
+        )
+        order_id = create.json()["id"]
+        balance = self._balance()
+        self.client.post(
+            f"/api/user-balance/{balance.id}/deposit/",
+            {"amount": "300", "balance_type": "paid_amount", "note": "دفع كامل"},
+            format="json",
+        )
+        self.assertEqual(self._balance().amount_to_pay(), Decimal("0.00"))
+
+        # Edit the (paid) invoice down to a single unit = 100. Allowed even
+        # though it's already paid; the customer ends up 200 in credit.
+        resp = self.client.put(
+            f"/api/orders/{order_id}/",
+            {"user": self.customer.id, "supplement": "0",
+             "order_items": [{"product": self.product.id, "quantity": 1}]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(self._balance().orders_total, Decimal("100.00"))
+        self.assertEqual(self._balance().amount_to_pay(), Decimal("-200.00"))
+
+
+class OrderRevisionTests(OrdersBaseTestCase):
+    def _create(self, qty=3, supp="0"):
+        return self.client.post("/api/orders/", self._order_payload(quantity=qty, supplement=supp), format="json")
+
+    def test_edit_keeps_id_and_records_revision(self):
+        oid = self._create(qty=3).json()["id"]
+        edit = {"user": self.customer.id, "supplement": "0",
+                "order_items": [{"product": self.product.id, "quantity": 2}]}
+        r = self.client.put(f"/api/orders/{oid}/", edit, format="json")
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(r.json()["id"], oid)  # id stays stable
+        revs = self.client.get(f"/api/orders/{oid}/revisions/").json()
+        self.assertEqual(len(revs), 1)
+        self.assertEqual(revs[0]["snapshot"]["items"][0]["quantity"], 3)  # old value preserved
+
+    def test_rollback_restores_previous_state(self):
+        oid = self._create(qty=3).json()["id"]  # owes 300
+        self.client.put(f"/api/orders/{oid}/", {
+            "user": self.customer.id, "supplement": "0",
+            "order_items": [{"product": self.product.id, "quantity": 5}],
+        }, format="json")  # owes 500
+        self.assertEqual(self._balance().orders_total, Decimal("500.00"))
+        rev_id = self.client.get(f"/api/orders/{oid}/revisions/").json()[0]["id"]
+        rb = self.client.post(f"/api/orders/{oid}/rollback/{rev_id}/", {}, format="json")
+        self.assertEqual(rb.status_code, 200, rb.content)
+        self.assertEqual(self._balance().orders_total, Decimal("300.00"))  # back to qty 3
+
+
+class OrderApiRobustnessTests(OrdersBaseTestCase):
+    def test_search_query_does_not_crash(self):
+        resp = self.client.get("/api/orders/?search=anything")
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    def test_analytics_returns_expected_totals(self):
+        self.client.post(
+            "/api/orders/", self._order_payload(quantity=3, supplement="50"), format="json"
+        )
+        resp = self.client.get("/api/orders-analytics/")
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+        today = resp.json()["today"]
+        self.assertEqual(Decimal(str(today["products_total"])), Decimal("300"))
+        self.assertEqual(Decimal(str(today["supplements_total"])), Decimal("50"))
+        self.assertEqual(Decimal(str(today["amount_to_pay_total"])), Decimal("350"))
+        self.assertEqual(today["products_count"], 3)
+
+    def test_analytics_range_mode_returns_totals_and_series(self):
+        self.client.post(
+            "/api/orders/", self._order_payload(quantity=3, supplement="50"), format="json"
+        )
+        for period, gran in [("day", "hour"), ("week", "day"), ("month", "day"), ("year", "month")]:
+            resp = self.client.get(f"/api/orders-analytics/?period={period}")
+            self.assertEqual(resp.status_code, 200, resp.content)
+            body = resp.json()
+            self.assertEqual(body["granularity"], gran)
+            self.assertIn("totals", body)
+            self.assertTrue(len(body["series"]) > 0)
+            # the order we created falls in every one of these ranges
+            self.assertEqual(Decimal(str(body["totals"]["amount_to_pay_total"])), Decimal("350"))
+
+    def test_analytics_custom_range(self):
+        resp = self.client.get("/api/orders-analytics/?start=2026-06-01&end=2026-06-14")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(len(resp.json()["series"]), 14)  # 14 daily buckets
+
+    def test_analytics_invalid_custom_range_is_400(self):
+        resp = self.client.get("/api/orders-analytics/?start=bad&end=worse")
+        self.assertEqual(resp.status_code, 400, resp.content)
+
+
+class OrderListFilterTests(OrdersBaseTestCase):
+    def _make_order(self):
+        return self.client.post("/api/orders/", self._order_payload(quantity=1, supplement="0"), format="json")
+
+    def test_filter_by_user(self):
+        self._make_order()
+        other = User.objects.create(first_name="عميل آخر")
+        resp = self.client.get(f"/api/orders/?user={self.customer.id}")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()["count"], 1)
+        resp2 = self.client.get(f"/api/orders/?user={other.id}")
+        self.assertEqual(resp2.json()["count"], 0)
+
+    def test_filter_by_date_range(self):
+        self._make_order()
+        from django.utils import timezone
+        today = timezone.localtime(timezone.now()).date().isoformat()
+        resp = self.client.get(f"/api/orders/?start={today}&end={today}")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()["count"], 1)
+        # a past window excludes today's order
+        resp2 = self.client.get("/api/orders/?start=2000-01-01&end=2000-01-02")
+        self.assertEqual(resp2.json()["count"], 0)
+
+
+class LedgerTests(OrdersBaseTestCase):
+    def test_order_writes_a_ledger_entry(self):
+        self.client.post(
+            "/api/orders/", self._order_payload(quantity=3, supplement="50"), format="json"
+        )
+        entry = LedgerEntry.objects.get(user=self.customer, kind=LedgerEntry.Kind.ORDER)
+        self.assertEqual(entry.field, "orders_total")
+        self.assertEqual(entry.amount, Decimal("350.00"))
+
+    def test_recompute_from_ledger_matches_cached_balance(self):
+        self.client.post(
+            "/api/orders/", self._order_payload(quantity=3, supplement="50"), format="json"
+        )
+        balance = self._balance()
+        self.client.post(
+            f"/api/user-balance/{balance.id}/deposit/",
+            {"amount": "120", "balance_type": "paid_amount"},
+            format="json",
+        )
+        balance = self._balance()
+
+        rebuilt = balance.recompute_from_ledger()
+        self.assertEqual(rebuilt["orders_total"], balance.orders_total)
+        self.assertEqual(rebuilt["paid_amount"], balance.paid_amount)
+
+
+class IdempotencyTests(OrdersBaseTestCase):
+    def test_replayed_order_uuid_charges_once(self):
+        payload = self._order_payload(quantity=3, supplement="50")
+        payload["client_uuid"] = str(uuid.uuid4())
+
+        first = self.client.post("/api/orders/", payload, format="json")
+        self.assertEqual(first.status_code, 201, first.content)
+
+        # Same request again (as an offline replay would send).
+        second = self.client.post("/api/orders/", payload, format="json")
+        self.assertIn(second.status_code, (200, 201), second.content)
+
+        self.assertEqual(Order.objects.count(), 1)
+        self.assertEqual(first.json()["id"], second.json()["id"])
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.stock, 7)  # decremented once, not twice
+        self.assertEqual(self._balance().orders_total, Decimal("350.00"))
+
+    def test_replayed_payment_uuid_applies_once(self):
+        self.client.post(
+            "/api/orders/", self._order_payload(quantity=3, supplement="50"), format="json"
+        )
+        balance = self._balance()
+        key = str(uuid.uuid4())
+        body = {"amount": "100", "balance_type": "paid_amount", "client_uuid": key}
+
+        first = self.client.post(f"/api/user-balance/{balance.id}/deposit/", body, format="json")
+        self.assertEqual(first.status_code, 200, first.content)
+        second = self.client.post(f"/api/user-balance/{balance.id}/deposit/", body, format="json")
+        self.assertEqual(second.status_code, 200, second.content)
+
+        balance = self._balance()
+        self.assertEqual(balance.paid_amount, Decimal("100.00"))  # applied once
+        self.assertEqual(
+            LedgerEntry.objects.filter(user=self.customer, kind=LedgerEntry.Kind.PAYMENT).count(),
+            1,
+        )

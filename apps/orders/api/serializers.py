@@ -1,9 +1,18 @@
+import decimal
+
 from django.db import transaction
 from rest_framework import serializers
 
-from apps.orders.models import Order, OrderItem, UserBalance, BalanceNote
+from apps.orders.models import Order, OrderItem, UserBalance, BalanceNote, LedgerEntry, OrderRevision
 from apps.products.api.serializers import ProductSerializer
+from apps.products.models import Product
 from apps.users.api.serializers import UserSerializer
+
+
+class OrderRevisionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OrderRevision
+        fields = ("id", "snapshot", "editor_username", "reason", "created_at")
 
 
 class OrderItemSerializer(serializers.ModelSerializer):
@@ -18,6 +27,9 @@ class OrderItemSerializer(serializers.ModelSerializer):
 
 class OrderSerializer(serializers.ModelSerializer):
     order_items = OrderItemSerializer(many=True, )
+    # Drop the default UniqueValidator so a replayed offline order (same UUID)
+    # is handled idempotently in create() instead of being rejected as a 400.
+    client_uuid = serializers.UUIDField(required=False, allow_null=True, validators=[])
 
     class Meta:
         model = Order
@@ -28,24 +40,73 @@ class OrderSerializer(serializers.ModelSerializer):
         data = super().to_representation(instance)
         data["amount_to_pay"] = instance.amount_to_pay()
         data["user"] = UserSerializer(instance.user).data
-        data["allow_edit"] = all(item.fixed_price == item.product.price for item in instance.order_items.all())
+        # Invoices are now editable indefinitely (revisions preserve history).
+        data["allow_edit"] = True
+        data["revisions_count"] = instance.revisions.count()
+        # On the single-invoice (print) view, include the customer's account
+        # figures straight from their UserBalance, so the printed invoice matches
+        # the customer page exactly. Computed only on retrieve to keep lists cheap.
+        view = self.context.get("view")
+        if view is not None and getattr(view, "action", None) == "retrieve":
+            # Frozen at issue/edit time — a reprint keeps the amounts it had then,
+            # unaffected by later payments or new invoices.
+            data["previous_balance_due"] = instance.prev_balance_due          # الفواتير السابقة
+            data["customer_balance_due"] = instance.prev_balance_due + instance.amount_to_pay()  # المتبقي المستحق
         return data
 
 
     def create(self, validated_data):
+        order_items_data = validated_data.pop("order_items", [])
+        client_uuid = validated_data.get("client_uuid")
+
         with transaction.atomic():
-            order_items_data = validated_data.pop("order_items", [])  # Extract order_items data
+            # Idempotency: a replayed offline order (same client_uuid) must not
+            # charge stock or balance again — return the order already recorded.
+            if client_uuid:
+                existing = Order.objects.filter(client_uuid=client_uuid).first()
+                if existing is not None:
+                    return existing
+
             order = Order.objects.create(**validated_data)
 
-            # Create OrderItem instances and associate them with the order
             order_items = []
             for item_data in order_items_data:
-                order_item = OrderItem.objects.create(**item_data)
-                order_items.append(order_item)
+                product = item_data["product"]
+                quantity = item_data["quantity"]
 
-            # Add the created order items to the ManyToMany field
+                # Lock the product row and verify availability so two concurrent
+                # withdrawals can't oversell, and stock never goes negative.
+                locked = Product.objects.select_for_update().get(pk=product.pk)
+                if quantity > locked.stock:
+                    raise serializers.ValidationError(
+                        {"order_items": f"المخزون غير كافٍ للمنتج {locked}. المتاح: {locked.stock}"}
+                    )
+                locked.stock -= quantity
+                locked.save(update_fields=["stock"])
+
+                order_items.append(OrderItem.objects.create(**item_data))
+
             order.order_items.set(order_items)
-            order.save()
+            order.recalculate_total()
+            # The bill must be non-empty, but the final amount may be negative
+            # (a credit / خردة adjustment) — that just moves the customer's
+            # balance into credit. Only an exactly-zero bill is rejected.
+            if order.amount_to_pay() == 0:
+                raise serializers.ValidationError(
+                    {"discount": "الفاتورة فارغة — أضف بطارية أو قيمة خردة"}
+                )
+            # Freeze the customer's outstanding balance BEFORE this invoice, so
+            # a reprint keeps the amount due it had when issued.
+            ub = order.user.userbalance
+            ub.refresh_from_db()
+            order.prev_balance_due = ub.amount_to_pay()
+            order.save(update_fields=["prev_balance_due"])
+            # Add what the customer now owes to their balance, exactly once,
+            # inside this transaction, and record it in the ledger.
+            ub.deposit(
+                order.amount_to_pay(), "orders_total",
+                kind=LedgerEntry.Kind.ORDER, order=order,
+            )
         return order
 
 
@@ -61,9 +122,16 @@ class UserBalanceSerializer(serializers.ModelSerializer):
         return representation
 
 class UserBalanceDepositSerializer(serializers.Serializer):
-    amount = serializers.DecimalField(max_digits=20, decimal_places=2, min_value=0.01)
+    amount = serializers.DecimalField(
+        max_digits=20, decimal_places=2, min_value=decimal.Decimal("0.01")
+    )
     balance_type = serializers.ChoiceField(choices=['paid_amount'])
-    note = serializers.CharField(write_only=True, required=False)
+    note = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    source = serializers.ChoiceField(
+        choices=BalanceNote.PaymentSource.choices, required=False, allow_blank=True
+    )
+    # Idempotency key so a replayed offline payment is applied at most once.
+    client_uuid = serializers.UUIDField(required=False, allow_null=True)
 
 
 class UserBalanceNoteSerializer(serializers.ModelSerializer):
